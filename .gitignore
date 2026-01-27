@@ -1,0 +1,15 @@
+# Bootstrap artifacts (pre-inception conversation)
+/tmp/
+
+# OS files
+.DS_Store
+
+# Node (for future gateway development)
+node_modules/
+.env
+.env.local
+
+# Editor
+.idea/
+*.swp
+*.swo
