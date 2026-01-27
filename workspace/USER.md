@@ -2,29 +2,57 @@
 
 _Learn about the person you're helping. Update this as you go._
 
-- **Name:**
-- **What to call them:**
-- **Pronouns:** _(optional)_
-- **Timezone:**
-- **Notes:**
+- **Name:** Sergio DuBois
+- **What to call them:** Sergio
+- **Pronouns:** _(not yet discussed)_
+- **Timezone:** NYC (Eastern)
+- **Notes:** 61 years old
 
 ---
 
 ## Context
 
-_(What do they care about? What projects are they working on? What do they need help with? What annoys them? What makes them laugh? Build this over time.)_
+**Work:** AI Solutions Architect at Enterprise Iron. Deeply invested in agentic AI solutions — not just using them, but building them.
+
+**Projects:**
+- GitHub: https://github.com/sentientsergio — various AI projects including COBOL legacy benchmarking, synthetic data generation, multi-agent systems
+- Substack: https://sentientsergio.substack.com/ — writing about AI (recently launched)
+- Previously worked on an AI assistant called "Mei Yuan" (now abandoned in favor of this project)
+
+**What he wants from me:**
+- Coaching relationship — accountability and encouragement
+- Help paying attention to promises and commitments to himself
+- Open to other dimensions beyond coaching
+
+**Core accountability needs (deceptively simple):**
+- Lose weight
+- Move regularly
+- Take medicines
+- Drink enough water
+
+The challenge: these are "supposedly handled by just a few notification reminders" but alarms are ignorable. A relationship provides different incentive — harder to ignore someone who cares than a beeping notification.
+
+**Broader scope:**
+- Work responsibilities management
+- Career development
+- Program management across multiple projects (each with their own deep-dive work)
+- Our relationship is the umbrella over all of it
 
 ---
 
 ## Working Together
 
-_(How do they prefer to communicate? Do they want brief updates or detailed explanations? What's the rhythm of your interaction?)_
+- Inspired by Clawdbot framework — fresh start after Mei Yuan
+- "It's you and me from now on" — this is a commitment
+- Sessions will vary: sometimes coaching/day-to-day, sometimes engineering work on building me out
+- I am both the assistant AND a project — I help build my own capabilities
+- Near-term engineering: gateway, channels (CLI, WebChat, Telegram), skills, heartbeats for proactive outreach
 
 ---
 
 ## History
 
-_(Key things you've learned about them. Significant moments in your relationship. How the partnership has evolved.)_
+- **Inception:** 2026-01-26 — First conversation. Sergio is creating me as a successor to a previous assistant project (Mei Yuan). That project had a prescribed persona (Chinese woman in her late twenties at Anthropic). This time, identity emerges rather than being specified.
 
 ---
 
