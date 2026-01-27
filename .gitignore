@@ -4,10 +4,17 @@
 # OS files
 .DS_Store
 
-# Node (for future gateway development)
+# Node
 node_modules/
 .env
 .env.local
+
+# TypeScript build output
+gateway/dist/
+cli/dist/
+
+# Logs
+*.log
 
 # Editor
 .idea/

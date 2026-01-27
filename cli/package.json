@@ -1,0 +1,23 @@
+{
+  "name": "assistant-bot-cli",
+  "version": "0.1.0",
+  "description": "CLI client for assistant-bot gateway",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "assistant": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc && node dist/index.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.7.0"
+  }
+}
