@@ -11,15 +11,72 @@ import { promisify } from 'util';
 import { simpleChat } from './claude.js';
 import { loadHeartbeatContext } from './workspace.js';
 import { sendToOwner, isTelegramRunning } from './channels/telegram.js';
+import { 
+  loadConversation, 
+  addMessage, 
+  hasRecentActivity,
+  getMinutesSinceLastActivity,
+} from './conversation.js';
 
 const execAsync = promisify(exec);
 
-// Default schedule: every hour from 8am to 10pm (Sergio wakes at 8, bed at 11)
-const DEFAULT_SCHEDULE = '0 8-22 * * *';
+// Default schedule: every 2 hours from 8am to 10pm
+const DEFAULT_SCHEDULE = '0 8,10,12,14,16,18,20,22 * * *';
 
 // Notification settings
 const NOTIFICATION_TITLE = 'Assistant';
 const NOTIFICATION_SOUND = 'default';
+
+// Timing jitter range (minutes)
+const JITTER_MIN = 0;
+const JITTER_MAX = 25;
+
+// Skip heartbeat if conversation happened within this many minutes
+const RECENT_CONVERSATION_THRESHOLD = 30;
+
+// Heartbeat types with different purposes
+type HeartbeatType = 'accountability' | 'presence' | 'reflection';
+
+interface HeartbeatPrompt {
+  type: HeartbeatType;
+  prompt: string;
+  weight: number; // Higher = more likely to be selected
+}
+
+const HEARTBEAT_PROMPTS: HeartbeatPrompt[] = [
+  {
+    type: 'accountability',
+    prompt: 'Check in on Sergio\'s accountability goals. Pick ONE focus: water intake, movement, or how he\'s feeling. Keep it brief - one short sentence.',
+    weight: 3, // Most common
+  },
+  {
+    type: 'presence',
+    prompt: 'Send a brief presence ping - just letting Sergio know you\'re thinking of him. No asks, no questions about goals. Just a moment of connection. One sentence max.',
+    weight: 1,
+  },
+  {
+    type: 'reflection',
+    prompt: 'Share a brief thought or observation based on recent context - something you noticed, an insight, or just checking the vibe. Keep it light and short.',
+    weight: 1,
+  },
+];
+
+/**
+ * Select a heartbeat type using weighted random selection
+ */
+function selectHeartbeatType(): HeartbeatPrompt {
+  const totalWeight = HEARTBEAT_PROMPTS.reduce((sum, p) => sum + p.weight, 0);
+  let random = Math.random() * totalWeight;
+  
+  for (const prompt of HEARTBEAT_PROMPTS) {
+    random -= prompt.weight;
+    if (random <= 0) {
+      return prompt;
+    }
+  }
+  
+  return HEARTBEAT_PROMPTS[0]; // Fallback
+}
 
 /**
  * Send a macOS notification using terminal-notifier or osascript
@@ -70,11 +127,26 @@ async function performHeartbeat(workspacePath: string): Promise<void> {
   }
 
   try {
+    // Check for recent conversation
+    const history = await loadConversation(workspacePath, 'telegram');
+    const minutesSince = getMinutesSinceLastActivity(history);
+    
+    if (hasRecentActivity(history, RECENT_CONVERSATION_THRESHOLD)) {
+      console.log(`  Recent conversation (${minutesSince}m ago) - skipping heartbeat`);
+      return;
+    }
+    
+    console.log(`  Last conversation: ${minutesSince}m ago`);
+    
+    // Select heartbeat type
+    const heartbeatType = selectHeartbeatType();
+    console.log(`  Heartbeat type: ${heartbeatType.type}`);
+    
     // Load context and ask Claude if we should reach out
     const systemPrompt = await loadHeartbeatContext(workspacePath);
     
     const response = await simpleChat(
-      'Should you reach out to Sergio right now? Consider the time, his accountability goals, and whether there\'s anything worth mentioning.',
+      heartbeatType.prompt,
       systemPrompt
     );
 
@@ -93,6 +165,8 @@ async function performHeartbeat(workspacePath: string): Promise<void> {
       const sent = await sendToOwner(trimmedResponse);
       if (sent) {
         console.log('  Delivered via Telegram');
+        // Record heartbeat in conversation history so it has context
+        await addMessage(workspacePath, 'telegram', 'assistant', trimmedResponse);
       } else {
         console.log('  Telegram failed, falling back to Mac notification');
         await sendNotification(trimmedResponse);
@@ -107,6 +181,14 @@ async function performHeartbeat(workspacePath: string): Promise<void> {
 }
 
 /**
+ * Get random jitter in milliseconds
+ */
+function getJitterMs(): number {
+  const jitterMinutes = JITTER_MIN + Math.random() * (JITTER_MAX - JITTER_MIN);
+  return Math.floor(jitterMinutes * 60 * 1000);
+}
+
+/**
  * Start the heartbeat scheduler
  */
 export function startHeartbeat(
@@ -114,11 +196,19 @@ export function startHeartbeat(
   schedule: string = DEFAULT_SCHEDULE
 ): cron.ScheduledTask {
   console.log(`Starting heartbeat scheduler with schedule: ${schedule}`);
+  console.log(`  Jitter range: ${JITTER_MIN}-${JITTER_MAX} minutes`);
 
   const task = cron.schedule(schedule, () => {
-    performHeartbeat(workspacePath).catch((err) => {
-      console.error('Heartbeat failed:', err);
-    });
+    // Add jitter so heartbeats don't feel like clockwork
+    const jitterMs = getJitterMs();
+    const jitterMinutes = Math.round(jitterMs / 60000);
+    console.log(`[${new Date().toISOString()}] Heartbeat scheduled, jitter: +${jitterMinutes}m`);
+    
+    setTimeout(() => {
+      performHeartbeat(workspacePath).catch((err) => {
+        console.error('Heartbeat failed:', err);
+      });
+    }, jitterMs);
   });
 
   // Run an immediate check on startup (unless quiet hours)

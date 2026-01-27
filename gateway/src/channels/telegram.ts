@@ -8,6 +8,13 @@
 import { Bot, Context } from 'grammy';
 import { chat } from '../claude.js';
 import { loadWorkspaceContext } from '../workspace.js';
+import { 
+  loadConversation, 
+  addMessage, 
+  formatHistoryForPrompt,
+  hasRecentActivity,
+  getMinutesSinceLastActivity,
+} from '../conversation.js';
 
 let bot: Bot | null = null;
 let ownerChatId: number | null = null;
@@ -48,12 +55,27 @@ export async function startTelegram(config: TelegramConfig): Promise<Bot> {
       // Load workspace context
       const workspaceContext = await loadWorkspaceContext(workspacePath);
       
+      // Load conversation history and add to context
+      const history = await loadConversation(workspacePath, 'telegram');
+      const historyPrompt = formatHistoryForPrompt(history);
+      
+      if (historyPrompt) {
+        workspaceContext.systemPrompt += '\n\n' + historyPrompt;
+        console.log(`[telegram] Loaded ${history.messages.length} messages from conversation history`);
+      }
+      
+      // Save user message to history
+      await addMessage(workspacePath, 'telegram', 'user', userMessage);
+      
       // Collect full response (Telegram doesn't support true streaming)
       let fullResponse = '';
       
       await chat(userMessage, workspaceContext, workspacePath, (delta) => {
         fullResponse += delta;
       });
+      
+      // Save assistant response to history
+      await addMessage(workspacePath, 'telegram', 'assistant', fullResponse);
 
       // Send response (split if too long)
       await sendLongMessage(ctx, fullResponse);

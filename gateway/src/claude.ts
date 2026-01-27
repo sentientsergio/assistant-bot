@@ -5,7 +5,16 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
-import { fileRead, fileWrite, fileList, getToolDefinitions } from './tools/files.js';
+import { 
+  fileRead, 
+  fileWrite, 
+  fileList, 
+  getToolDefinitions,
+  scheduleHeartbeat,
+  listHeartbeats,
+  cancelHeartbeat,
+} from './tools/files.js';
+import { webFetch, getWebToolDefinitions } from './tools/web.js';
 
 const client = new Anthropic();
 
@@ -23,6 +32,11 @@ interface ToolInput {
   path?: string;
   directory?: string;
   content?: string;
+  purpose?: string;
+  scheduled_for?: string;
+  recurring_schedule?: string;
+  id?: string;
+  url?: string;
 }
 
 export async function chat(
@@ -44,7 +58,7 @@ export async function chat(
       max_tokens: MAX_TOKENS,
       system: context.systemPrompt,
       messages,
-      tools: getToolDefinitions(),
+      tools: [...getToolDefinitions(), ...getWebToolDefinitions()],
       stream: true,
     });
 
@@ -104,6 +118,22 @@ export async function chat(
           break;
         case 'file_list':
           toolResult = await fileList(workspacePath, toolInput.directory || '.');
+          break;
+        case 'schedule_heartbeat':
+          toolResult = await scheduleHeartbeat(
+            toolInput.purpose || '',
+            toolInput.scheduled_for,
+            toolInput.recurring_schedule
+          );
+          break;
+        case 'list_scheduled_heartbeats':
+          toolResult = await listHeartbeats();
+          break;
+        case 'cancel_scheduled_heartbeat':
+          toolResult = await cancelHeartbeat(toolInput.id || '');
+          break;
+        case 'web_fetch':
+          toolResult = await webFetch(toolInput.url || '');
           break;
         default:
           toolResult = `Unknown tool: ${toolUse.name}`;

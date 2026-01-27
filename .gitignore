@@ -1,6 +1,12 @@
 # Bootstrap artifacts (pre-inception conversation)
 /tmp/
 
+# Personal workspace (use workspace-template/ for examples)
+/workspace/
+
+# INCEPTION.md at root (indicates inception in progress)
+/INCEPTION.md
+
 # OS files
 .DS_Store
 

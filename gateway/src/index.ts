@@ -7,6 +7,7 @@ import 'dotenv/config';
 import { createServer } from './server.js';
 import { startHeartbeat } from './heartbeat.js';
 import { startTelegram, stopTelegram } from './channels/telegram.js';
+import { initScheduledHeartbeats } from './scheduled-heartbeats.js';
 
 const PORT = parseInt(process.env.GATEWAY_PORT || '18789', 10);
 const WORKSPACE_PATH = process.env.WORKSPACE_PATH || '../workspace';
@@ -33,7 +34,10 @@ async function main() {
     console.log('  Telegram: disabled (no token or owner ID)');
   }
 
-  // Start heartbeat scheduler
+  // Initialize scheduled heartbeats (one-off and recurring)
+  await initScheduledHeartbeats(WORKSPACE_PATH);
+
+  // Start heartbeat scheduler (regular cadence)
   startHeartbeat(WORKSPACE_PATH);
 
   // Handle graceful shutdown

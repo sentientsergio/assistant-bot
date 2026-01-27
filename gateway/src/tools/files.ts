@@ -8,6 +8,11 @@
 import { readFile, writeFile, readdir, stat, mkdir } from 'fs/promises';
 import { join, resolve, relative, dirname } from 'path';
 import type Anthropic from '@anthropic-ai/sdk';
+import {
+  addScheduledHeartbeat,
+  listScheduledHeartbeats,
+  removeHeartbeat,
+} from '../scheduled-heartbeats.js';
 
 /**
  * Resolve a path safely within the workspace
@@ -115,6 +120,59 @@ function formatSize(bytes: number): string {
 }
 
 /**
+ * Schedule a heartbeat (one-time or recurring)
+ */
+export async function scheduleHeartbeat(
+  purpose: string,
+  scheduledFor?: string,
+  recurringSchedule?: string
+): Promise<string> {
+  const hb = await addScheduledHeartbeat(purpose, {
+    scheduledFor,
+    recurringSchedule,
+  });
+  
+  if (hb.type === 'one-time') {
+    return `Scheduled one-time heartbeat (${hb.id}) for ${hb.scheduledFor}: "${purpose}"`;
+  } else {
+    return `Scheduled recurring heartbeat (${hb.id}) on schedule "${hb.recurringSchedule}": "${purpose}"`;
+  }
+}
+
+/**
+ * List all scheduled heartbeats
+ */
+export async function listHeartbeats(): Promise<string> {
+  const heartbeats = await listScheduledHeartbeats();
+  
+  if (heartbeats.length === 0) {
+    return 'No scheduled heartbeats.';
+  }
+  
+  const lines = heartbeats.map(hb => {
+    if (hb.type === 'one-time') {
+      return `- [${hb.id}] One-time at ${hb.scheduledFor}: "${hb.purpose}"`;
+    } else {
+      return `- [${hb.id}] Recurring (${hb.recurringSchedule}): "${hb.purpose}"`;
+    }
+  });
+  
+  return lines.join('\n');
+}
+
+/**
+ * Cancel a scheduled heartbeat
+ */
+export async function cancelHeartbeat(id: string): Promise<string> {
+  const removed = await removeHeartbeat(id);
+  if (removed) {
+    return `Cancelled heartbeat: ${id}`;
+  } else {
+    return `Heartbeat not found: ${id}`;
+  }
+}
+
+/**
  * Get tool definitions for the Anthropic API
  */
 export function getToolDefinitions(): Anthropic.Tool[] {
@@ -163,6 +221,51 @@ export function getToolDefinitions(): Anthropic.Tool[] {
           },
         },
         required: [],
+      },
+    },
+    {
+      name: 'schedule_heartbeat',
+      description: 'Schedule a future heartbeat/reminder. Use for one-time check-ins (before meetings, end of day) or recurring reminders. The message will be sent to Telegram at the specified time.',
+      input_schema: {
+        type: 'object' as const,
+        properties: {
+          purpose: {
+            type: 'string',
+            description: 'The message to send when the heartbeat fires. Keep it brief.',
+          },
+          scheduled_for: {
+            type: 'string',
+            description: 'For one-time heartbeats: ISO 8601 timestamp (e.g., "2026-01-27T15:45:00"). Leave empty for recurring.',
+          },
+          recurring_schedule: {
+            type: 'string',
+            description: 'For recurring heartbeats: cron expression (e.g., "0 15 * * *" for 3pm daily). Leave empty for one-time.',
+          },
+        },
+        required: ['purpose'],
+      },
+    },
+    {
+      name: 'list_scheduled_heartbeats',
+      description: 'List all currently scheduled heartbeats (one-time and recurring).',
+      input_schema: {
+        type: 'object' as const,
+        properties: {},
+        required: [],
+      },
+    },
+    {
+      name: 'cancel_scheduled_heartbeat',
+      description: 'Cancel a scheduled heartbeat by ID.',
+      input_schema: {
+        type: 'object' as const,
+        properties: {
+          id: {
+            type: 'string',
+            description: 'The ID of the heartbeat to cancel.',
+          },
+        },
+        required: ['id'],
       },
     },
   ];
