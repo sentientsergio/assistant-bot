@@ -21,6 +21,7 @@ export interface ConversationHistory {
 }
 
 const HISTORY_TTL_HOURS = 24;
+const MAX_MESSAGES = 20; // Limit to control context size and cost
 
 /**
  * Get the path to a channel's conversation file
@@ -102,14 +103,20 @@ export async function addMessage(
 }
 
 /**
- * Remove messages older than TTL
+ * Remove messages older than TTL and limit to max count
  */
 function pruneOldMessages(history: ConversationHistory): ConversationHistory {
   const cutoff = new Date();
   cutoff.setHours(cutoff.getHours() - HISTORY_TTL_HOURS);
   const cutoffISO = cutoff.toISOString();
   
-  const filtered = history.messages.filter(msg => msg.timestamp > cutoffISO);
+  // First filter by time
+  let filtered = history.messages.filter(msg => msg.timestamp > cutoffISO);
+  
+  // Then limit by count (keep most recent)
+  if (filtered.length > MAX_MESSAGES) {
+    filtered = filtered.slice(-MAX_MESSAGES);
+  }
   
   return {
     ...history,

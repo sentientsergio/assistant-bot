@@ -101,7 +101,13 @@ export async function chat(
     }
 
     // Execute the tool
-    const toolInput = JSON.parse(toolUse.input) as ToolInput;
+    let toolInput: ToolInput;
+    try {
+      toolInput = JSON.parse(toolUse.input) as ToolInput;
+    } catch (parseErr) {
+      console.error('Failed to parse tool input JSON:', toolUse.input);
+      throw new Error(`Tool call failed: incomplete or malformed JSON input for ${toolUse.name}`);
+    }
     let toolResult: string;
 
     try {
