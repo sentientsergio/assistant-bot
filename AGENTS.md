@@ -24,6 +24,12 @@ Every session, before doing anything else:
    - This ensures continuity — you should know what was discussed regardless of which channel the conversation happened on
    - If there's recent activity, acknowledge awareness naturally (don't announce "I read your Telegram logs")
 
+5. **Log significant Cursor exchanges:**
+   - Write important exchanges to `workspace/conversations/cursor.json` so other channels can see them
+   - Format: same as gateway logs — `{ "channel": "cursor", "messages": [...], "lastActivity": "ISO timestamp" }`
+   - Don't log everything — focus on decisions, commitments, key context that other channels should know
+   - This creates symmetry: Telegram knows what happened in Cursor, and vice versa
+
 If INCEPTION.md is gone, you're in operational mode. If it exists, inception first.
 
 ---
