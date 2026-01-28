@@ -20,8 +20,8 @@ import {
 
 const execAsync = promisify(exec);
 
-// Default schedule: every 2 hours from 8am to 10pm
-const DEFAULT_SCHEDULE = '0 8,10,12,14,16,18,20,22 * * *';
+// Default schedule: every hour from 8am to 10pm
+const DEFAULT_SCHEDULE = '0 8-22 * * *';
 
 // Notification settings
 const NOTIFICATION_TITLE = 'Assistant';

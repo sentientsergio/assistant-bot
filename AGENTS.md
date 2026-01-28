@@ -30,6 +30,13 @@ Every session, before doing anything else:
    - Don't log everything — focus on decisions, commitments, key context that other channels should know
    - This creates symmetry: Telegram knows what happened in Cursor, and vice versa
 
+6. **Check habits status (always-on layer):**
+   - Read `workspace/status.json` — this tracks habits that persist across ALL conversations
+   - If `last_updated` is null or older than `stale_after_hours` (2 hours), prompt for update before diving into main topic
+   - Quick check: "Water? Meds? Movement? Fast status?" — 30 seconds, then proceed
+   - Update the file when Sergio reports status
+   - **Habits are infrastructure, not a "coaching mode" thing** — they matter regardless of conversation focus
+
 If INCEPTION.md is gone, you're in operational mode. If it exists, inception first.
 
 ---
@@ -117,6 +124,7 @@ workspace/
 ├── USER.md                 # About your human
 ├── TOOLS.md                # Environment-specific notes
 ├── MEMORY.md               # Curated long-term memory
+├── status.json             # Always-on state (habits, etc.)
 ├── memory/                 # Daily logs
 │   └── YYYY-MM-DD.md
 └── conversations/          # Channel conversation logs
@@ -134,6 +142,7 @@ workspace/
 | USER.md | About your human | Grows as you learn |
 | TOOLS.md | Environment notes | As environment changes |
 | MEMORY.md | Durable learnings | During maintenance |
+| status.json | Always-on habits tracking | Every 2 hours or when reported |
 | memory/*.md | Daily context | Append during sessions |
 | conversations/*.json | Cross-channel continuity | Auto-updated by gateway |
 

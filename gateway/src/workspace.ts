@@ -59,6 +59,72 @@ If there's nothing significant, say "No significant activity in other channels."
   }
 }
 
+/**
+ * Status data structure for always-on tracking (habits, etc.)
+ */
+interface StatusData {
+  habits: {
+    water_oz: number | null;
+    meds_taken: boolean | null;
+    movement_done: boolean | null;
+    fast_status: string | null;
+  };
+  last_updated: string | null;
+  stale_after_hours: number;
+}
+
+/**
+ * Load status.json and determine if habits check is needed
+ */
+async function loadStatusContext(workspacePath: string): Promise<string> {
+  const statusPath = join(workspacePath, 'status.json');
+  
+  try {
+    const content = await readFile(statusPath, 'utf-8');
+    const status: StatusData = JSON.parse(content);
+    
+    // Check if status is stale
+    const isStale = !status.last_updated || 
+      (Date.now() - new Date(status.last_updated).getTime()) > (status.stale_after_hours * 60 * 60 * 1000);
+    
+    if (isStale) {
+      console.log('[workspace] Status is stale - habits check needed');
+      return `## ⚠️ Habits Status Check Needed
+
+Status hasn't been updated in over ${status.stale_after_hours} hours. Before diving into the main topic, ask for a quick habits update:
+- Water: how many oz so far?
+- Meds: taken today?
+- Movement: any activity?
+- Fast status: in window, fasting, etc.?
+
+Update workspace/status.json with the response.
+
+---
+`;
+    }
+    
+    // Format current status
+    const h = status.habits;
+    const lastUpdate = status.last_updated 
+      ? new Date(status.last_updated).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+      : 'unknown';
+    
+    console.log(`[workspace] Status current (updated ${lastUpdate})`);
+    return `## Current Habits Status (as of ${lastUpdate})
+
+- Water: ${h.water_oz !== null ? h.water_oz + 'oz' : 'unknown'}
+- Meds: ${h.meds_taken !== null ? (h.meds_taken ? 'taken' : 'not taken') : 'unknown'}
+- Movement: ${h.movement_done !== null ? (h.movement_done ? 'done' : 'not yet') : 'unknown'}
+- Fast: ${h.fast_status || 'unknown'}
+
+---
+`;
+  } catch (err) {
+    console.log('[workspace] No status.json found or error reading it');
+    return '';
+  }
+}
+
 interface WorkspaceFile {
   name: string;
   content: string;
@@ -106,6 +172,9 @@ export async function loadWorkspaceContext(
   
   // Get cross-channel awareness (summarize activity from OTHER channels)
   const crossChannelSummary = await summarizeCrossChannelActivity(absolutePath, currentChannel);
+  
+  // Get habits status (always-on layer)
+  const statusContext = await loadStatusContext(absolutePath);
 
   // Core identity files (always loaded)
   const coreFiles = ['SOUL.md', 'IDENTITY.md', 'USER.md', 'TOOLS.md'];
@@ -153,7 +222,7 @@ export async function loadWorkspaceContext(
   }
 
   // Build system prompt
-  const systemPrompt = buildSystemPrompt(files, crossChannelSummary);
+  const systemPrompt = buildSystemPrompt(files, crossChannelSummary, statusContext);
   
   console.log(`[workspace] Total files loaded: ${files.length}`);
   console.log(`[workspace] System prompt length: ${systemPrompt.length} chars`);
@@ -167,7 +236,7 @@ export async function loadWorkspaceContext(
 /**
  * Build the system prompt from loaded workspace files
  */
-function buildSystemPrompt(files: WorkspaceFile[], crossChannelSummary?: string): string {
+function buildSystemPrompt(files: WorkspaceFile[], crossChannelSummary?: string, statusContext?: string): string {
   const sections: string[] = [];
 
   sections.push(`You are an AI assistant with persistent identity and memory.
@@ -197,6 +266,11 @@ ${crossChannelSummary}
 
 ---
 `);
+  }
+
+  // Add habits status (always-on layer)
+  if (statusContext && statusContext.trim()) {
+    sections.push(statusContext);
   }
 
   sections.push(`## Your Workspace Files
