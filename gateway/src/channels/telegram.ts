@@ -52,8 +52,8 @@ export async function startTelegram(config: TelegramConfig): Promise<Bot> {
     await ctx.replyWithChatAction('typing');
 
     try {
-      // Load workspace context
-      const workspaceContext = await loadWorkspaceContext(workspacePath);
+      // Load workspace context (pass channel for cross-channel awareness)
+      const workspaceContext = await loadWorkspaceContext(workspacePath, 'telegram');
       
       // Load conversation history and add to context
       const history = await loadConversation(workspacePath, 'telegram');

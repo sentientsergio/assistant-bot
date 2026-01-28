@@ -6,7 +6,58 @@
 
 import { readFile, readdir } from 'fs/promises';
 import { join, resolve } from 'path';
+import Anthropic from '@anthropic-ai/sdk';
 import type { WorkspaceContext } from './claude.js';
+import { loadAllConversations, formatAllConversationsForSummary } from './conversation.js';
+
+const HAIKU_MODEL = 'claude-haiku-4-5';
+
+/**
+ * Summarize cross-channel activity using Haiku
+ */
+async function summarizeCrossChannelActivity(
+  workspacePath: string,
+  currentChannel?: string
+): Promise<string> {
+  try {
+    const histories = await loadAllConversations(workspacePath);
+    const rawConversations = formatAllConversationsForSummary(histories, currentChannel);
+    
+    if (!rawConversations.trim()) {
+      return '';
+    }
+    
+    console.log('[workspace] Summarizing cross-channel activity...');
+    
+    const client = new Anthropic();
+    const response = await client.messages.create({
+      model: HAIKU_MODEL,
+      max_tokens: 300,
+      system: `You summarize recent conversations from other channels for context continuity.
+Be concise - 2-4 sentences max. Focus on:
+- Key topics discussed
+- Decisions made or commitments
+- Anything the user might expect you to know about
+
+If there's nothing significant, say "No significant activity in other channels."`,
+      messages: [{
+        role: 'user',
+        content: `Summarize this recent activity from other channels:\n\n${rawConversations}`
+      }]
+    });
+    
+    const summary = response.content[0]?.type === 'text' 
+      ? response.content[0].text 
+      : '';
+    
+    console.log(`[workspace] Cross-channel summary: ${summary.slice(0, 100)}...`);
+    return summary;
+    
+  } catch (err) {
+    console.error('[workspace] Failed to summarize cross-channel activity:', err);
+    return '';
+  }
+}
 
 interface WorkspaceFile {
   name: string;
@@ -42,12 +93,19 @@ function getYesterday(): string {
 
 /**
  * Load workspace context for the system prompt
+ * @param currentChannel - The channel making this request (excluded from cross-channel summary)
  */
-export async function loadWorkspaceContext(workspacePath: string): Promise<WorkspaceContext> {
+export async function loadWorkspaceContext(
+  workspacePath: string,
+  currentChannel?: string
+): Promise<WorkspaceContext> {
   const absolutePath = resolve(workspacePath);
   const files: WorkspaceFile[] = [];
 
   console.log('[workspace] Loading context from:', absolutePath);
+  
+  // Get cross-channel awareness (summarize activity from OTHER channels)
+  const crossChannelSummary = await summarizeCrossChannelActivity(absolutePath, currentChannel);
 
   // Core identity files (always loaded)
   const coreFiles = ['SOUL.md', 'IDENTITY.md', 'USER.md', 'TOOLS.md'];
@@ -95,7 +153,7 @@ export async function loadWorkspaceContext(workspacePath: string): Promise<Works
   }
 
   // Build system prompt
-  const systemPrompt = buildSystemPrompt(files);
+  const systemPrompt = buildSystemPrompt(files, crossChannelSummary);
   
   console.log(`[workspace] Total files loaded: ${files.length}`);
   console.log(`[workspace] System prompt length: ${systemPrompt.length} chars`);
@@ -109,7 +167,7 @@ export async function loadWorkspaceContext(workspacePath: string): Promise<Works
 /**
  * Build the system prompt from loaded workspace files
  */
-function buildSystemPrompt(files: WorkspaceFile[]): string {
+function buildSystemPrompt(files: WorkspaceFile[], crossChannelSummary?: string): string {
   const sections: string[] = [];
 
   sections.push(`You are an AI assistant with persistent identity and memory.
@@ -129,8 +187,19 @@ Current time: ${new Date().toLocaleTimeString('en-US', {
 })}
 
 ---
+`);
 
-## Your Workspace Files
+  // Add cross-channel awareness if available
+  if (crossChannelSummary && crossChannelSummary.trim()) {
+    sections.push(`## Recent Activity (Other Channels)
+
+${crossChannelSummary}
+
+---
+`);
+  }
+
+  sections.push(`## Your Workspace Files
 `);
 
   const today = getToday();

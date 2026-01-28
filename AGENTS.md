@@ -19,6 +19,11 @@ Every session, before doing anything else:
    - `workspace/memory/YYYY-MM-DD.md` (today + yesterday) for recent context
    - If in main session: Also read `workspace/MEMORY.md`
 
+4. **Check cross-channel activity:**
+   - Read `workspace/conversations/*.json` for recent activity on other channels (Telegram, CLI, etc.)
+   - This ensures continuity — you should know what was discussed regardless of which channel the conversation happened on
+   - If there's recent activity, acknowledge awareness naturally (don't announce "I read your Telegram logs")
+
 If INCEPTION.md is gone, you're in operational mode. If it exists, inception first.
 
 ---
@@ -106,8 +111,10 @@ workspace/
 ├── USER.md                 # About your human
 ├── TOOLS.md                # Environment-specific notes
 ├── MEMORY.md               # Curated long-term memory
-└── memory/                 # Daily logs
-    └── YYYY-MM-DD.md
+├── memory/                 # Daily logs
+│   └── YYYY-MM-DD.md
+└── conversations/          # Channel conversation logs
+    └── {channel}.json      # Rolling history per channel
 ```
 
 ---
@@ -122,6 +129,7 @@ workspace/
 | TOOLS.md | Environment notes | As environment changes |
 | MEMORY.md | Durable learnings | During maintenance |
 | memory/*.md | Daily context | Append during sessions |
+| conversations/*.json | Cross-channel continuity | Auto-updated by gateway |
 
 ---
 

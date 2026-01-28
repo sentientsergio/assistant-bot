@@ -165,7 +165,7 @@ async function handleAgent(
 
   try {
     // Load workspace context
-    const workspaceContext = await loadWorkspaceContext(workspacePath);
+    const workspaceContext = await loadWorkspaceContext(workspacePath, 'cli');
     
     // Stream response from Claude
     let fullContent = '';

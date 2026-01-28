@@ -5,7 +5,7 @@
  * History is stored per-channel and pruned after 24 hours.
  */
 
-import { readFile, writeFile, mkdir } from 'fs/promises';
+import { readFile, writeFile, mkdir, readdir } from 'fs/promises';
 import { join, dirname } from 'path';
 
 export interface Message {
@@ -157,6 +157,76 @@ export function formatHistoryForPrompt(history: ConversationHistory): string {
     });
     const role = msg.role === 'user' ? 'Sergio' : 'You';
     lines.push(`**${role}** (${time}): ${msg.content}\n`);
+  }
+  
+  return lines.join('\n');
+}
+
+/**
+ * Load all conversation histories from all channels
+ */
+export async function loadAllConversations(
+  workspacePath: string
+): Promise<ConversationHistory[]> {
+  const conversationsDir = join(workspacePath, 'conversations');
+  
+  try {
+    const files = await readdir(conversationsDir);
+    const jsonFiles = files.filter(f => f.endsWith('.json'));
+    
+    const histories: ConversationHistory[] = [];
+    
+    for (const file of jsonFiles) {
+      try {
+        const content = await readFile(join(conversationsDir, file), 'utf-8');
+        const history: ConversationHistory = JSON.parse(content);
+        const pruned = pruneOldMessages(history);
+        if (pruned.messages.length > 0) {
+          histories.push(pruned);
+        }
+      } catch {
+        // Skip invalid files
+      }
+    }
+    
+    return histories;
+  } catch {
+    // Directory doesn't exist yet
+    return [];
+  }
+}
+
+/**
+ * Format all conversations for cross-channel summarization
+ */
+export function formatAllConversationsForSummary(
+  histories: ConversationHistory[],
+  excludeChannel?: string
+): string {
+  const otherChannels = histories.filter(h => h.channel !== excludeChannel);
+  
+  if (otherChannels.length === 0) {
+    return '';
+  }
+  
+  const lines: string[] = [];
+  
+  for (const history of otherChannels) {
+    if (history.messages.length === 0) continue;
+    
+    lines.push(`\n[${history.channel.toUpperCase()}]`);
+    for (const msg of history.messages) {
+      const time = new Date(msg.timestamp).toLocaleTimeString('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+      const role = msg.role === 'user' ? 'Sergio' : 'Claire';
+      // Truncate long messages for summarization
+      const content = msg.content.length > 200 
+        ? msg.content.slice(0, 200) + '...' 
+        : msg.content;
+      lines.push(`${time} ${role}: ${content}`);
+    }
   }
   
   return lines.join('\n');

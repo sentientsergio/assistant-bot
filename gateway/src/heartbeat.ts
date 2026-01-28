@@ -179,7 +179,7 @@ async function performHeartbeat(
     
     if (heartbeatType.useTools) {
       // Use full chat with tool access
-      const workspaceContext = await loadWorkspaceContext(workspacePath);
+      const workspaceContext = await loadWorkspaceContext(workspacePath, 'heartbeat');
       let fullResponse = '';
       
       response = await chat(
