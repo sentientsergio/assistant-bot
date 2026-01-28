@@ -15,6 +15,12 @@ import {
   cancelHeartbeat,
 } from './tools/files.js';
 import { webFetch, getWebToolDefinitions } from './tools/web.js';
+import { 
+  listEvents, 
+  createEvent, 
+  getCalendarToolDefinitions, 
+  isCalendarConfigured 
+} from './tools/calendar.js';
 
 const client = new Anthropic();
 
@@ -83,6 +89,13 @@ interface ToolInput {
   recurring_schedule?: string;
   id?: string;
   url?: string;
+  // Calendar inputs
+  max_results?: number;
+  summary?: string;
+  start_time?: string;
+  end_time?: string;
+  description?: string;
+  location?: string;
 }
 
 export async function chat(
@@ -109,7 +122,11 @@ export async function chat(
       max_tokens: MAX_TOKENS,
       system: context.systemPrompt,
       messages,
-      tools: [...getToolDefinitions(), ...getWebToolDefinitions()],
+      tools: [
+        ...getToolDefinitions(), 
+        ...getWebToolDefinitions(),
+        ...(isCalendarConfigured() ? getCalendarToolDefinitions() : []),
+      ],
       stream: true,
     });
 
@@ -196,6 +213,18 @@ export async function chat(
           break;
         case 'web_fetch':
           toolResult = await webFetch(toolInput.url || '');
+          break;
+        case 'calendar_list_events':
+          toolResult = await listEvents(toolInput.max_results || 10);
+          break;
+        case 'calendar_create_event':
+          toolResult = await createEvent(
+            toolInput.summary || '',
+            toolInput.start_time || '',
+            toolInput.end_time || '',
+            toolInput.description,
+            toolInput.location
+          );
           break;
         default:
           toolResult = `Unknown tool: ${toolUse.name}`;

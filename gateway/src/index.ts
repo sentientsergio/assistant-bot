@@ -8,6 +8,7 @@ import { createServer } from './server.js';
 import { startHeartbeat } from './heartbeat.js';
 import { startTelegram, stopTelegram } from './channels/telegram.js';
 import { initScheduledHeartbeats } from './scheduled-heartbeats.js';
+import { startWebhookServer, registerDefaultHandler } from './webhook.js';
 
 const PORT = parseInt(process.env.GATEWAY_PORT || '18789', 10);
 const WORKSPACE_PATH = process.env.WORKSPACE_PATH || '../workspace';
@@ -21,6 +22,10 @@ async function main() {
 
   // Start WebSocket server
   const server = createServer(PORT, WORKSPACE_PATH);
+
+  // Start webhook HTTP server
+  startWebhookServer();
+  registerDefaultHandler(); // Enable test webhook → Telegram
 
   // Start Telegram bot if configured
   if (TELEGRAM_TOKEN && TELEGRAM_OWNER_ID) {
