@@ -71,16 +71,22 @@ export async function loadWorkspaceContext(workspacePath: string): Promise<Works
     console.log(`[workspace] Not found: MEMORY.md`);
   }
 
-  // Daily memory files (today + yesterday)
+  // Daily memory files (today + yesterday) - truncate if too long
   const memoryDir = join(absolutePath, 'memory');
   const today = getToday();
   const yesterday = getYesterday();
+  const MAX_DAILY_MEMORY_CHARS = 4000; // Limit to control context size
 
   console.log(`[workspace] Looking for daily memory: ${yesterday}, ${today}`);
   
   for (const date of [yesterday, today]) {
-    const content = await tryReadFile(join(memoryDir, `${date}.md`));
+    let content = await tryReadFile(join(memoryDir, `${date}.md`));
     if (content) {
+      // Truncate if too long (keep most recent entries at end)
+      if (content.length > MAX_DAILY_MEMORY_CHARS) {
+        content = '...(earlier entries truncated)...\n\n' + content.slice(-MAX_DAILY_MEMORY_CHARS);
+        console.log(`[workspace] Truncated: memory/${date}.md to ${MAX_DAILY_MEMORY_CHARS} chars`);
+      }
       files.push({ name: `memory/${date}.md`, content });
       console.log(`[workspace] Loaded: memory/${date}.md (${content.length} chars)`);
     } else {

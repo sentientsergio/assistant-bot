@@ -103,10 +103,15 @@ export async function chat(
     // Execute the tool
     let toolInput: ToolInput;
     try {
-      toolInput = JSON.parse(toolUse.input) as ToolInput;
+      toolInput = JSON.parse(toolUse.input || '{}') as ToolInput;
     } catch (parseErr) {
-      console.error('Failed to parse tool input JSON:', toolUse.input);
-      throw new Error(`Tool call failed: incomplete or malformed JSON input for ${toolUse.name}`);
+      // Tool JSON was incomplete/malformed - likely context limit hit
+      // Return what we have so far instead of crashing
+      console.error('Failed to parse tool input JSON, returning partial response:', toolUse.input);
+      if (fullResponse.trim()) {
+        return fullResponse;
+      }
+      return "I tried to do something but hit a limit. Could you try a shorter message or ask again?";
     }
     let toolResult: string;
 

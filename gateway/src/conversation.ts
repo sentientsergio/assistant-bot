@@ -21,7 +21,7 @@ export interface ConversationHistory {
 }
 
 const HISTORY_TTL_HOURS = 24;
-const MAX_MESSAGES = 20; // Limit to control context size and cost
+const MAX_MESSAGES = 5; // Keep minimal for continuity, control cost
 
 /**
  * Get the path to a channel's conversation file
