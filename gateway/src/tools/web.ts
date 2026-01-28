@@ -6,7 +6,7 @@
 
 import * as cheerio from 'cheerio';
 
-const MAX_CONTENT_LENGTH = 50000; // ~50KB text limit
+const MAX_CONTENT_LENGTH = 16000; // ~16KB text limit (controls token cost)
 const FETCH_TIMEOUT = 10000; // 10 seconds
 
 /**

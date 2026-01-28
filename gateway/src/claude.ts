@@ -18,8 +18,54 @@ import { webFetch, getWebToolDefinitions } from './tools/web.js';
 
 const client = new Anthropic();
 
-const MODEL = 'claude-sonnet-4-20250514';
+// Model configuration
+const HAIKU_MODEL = 'claude-haiku-4-5';
+const SONNET_MODEL = 'claude-sonnet-4-5';
 const MAX_TOKENS = 4096;
+
+// Triage prompt for routing decisions
+const TRIAGE_PROMPT = `You are a routing assistant. Given a user message, determine if it requires deep reasoning or is straightforward.
+
+COMPLEX (use Sonnet):
+- Multi-step analysis or planning
+- Nuanced judgment calls
+- Complex code review or architecture
+- Philosophical or ethical reasoning
+- Ambiguous situations requiring careful thought
+
+SIMPLE (use Haiku):
+- Greetings, status updates, casual chat
+- File operations (read, write, list)
+- Straightforward questions with clear answers
+- Fetching URLs or looking things up
+- Accountability check-ins
+- Following clear instructions
+
+Reply with exactly one word: SIMPLE or COMPLEX`;
+
+/**
+ * Triage a message to determine which model should handle it
+ */
+async function triageMessage(userMessage: string): Promise<'haiku' | 'sonnet'> {
+  try {
+    const response = await client.messages.create({
+      model: HAIKU_MODEL,
+      max_tokens: 10,
+      system: TRIAGE_PROMPT,
+      messages: [{ role: 'user', content: userMessage }],
+    });
+
+    const text = response.content[0]?.type === 'text' 
+      ? response.content[0].text.trim().toUpperCase() 
+      : '';
+    
+    return text.includes('COMPLEX') ? 'sonnet' : 'haiku';
+  } catch (err) {
+    // On triage failure, default to haiku (cheaper, usually sufficient)
+    console.error('[triage] Error, defaulting to haiku:', err);
+    return 'haiku';
+  }
+}
 
 export interface WorkspaceContext {
   systemPrompt: string;
@@ -45,6 +91,11 @@ export async function chat(
   workspacePath: string,
   onDelta: StreamCallback
 ): Promise<string> {
+  // Triage to determine which model to use
+  const modelChoice = await triageMessage(userMessage);
+  const model = modelChoice === 'sonnet' ? SONNET_MODEL : HAIKU_MODEL;
+  console.log(`[chat] Routed to ${modelChoice} (${model})`);
+
   const messages: Anthropic.MessageParam[] = [
     { role: 'user', content: userMessage }
   ];
@@ -54,7 +105,7 @@ export async function chat(
   // Loop to handle tool calls
   while (true) {
     const response = await client.messages.create({
-      model: MODEL,
+      model,
       max_tokens: MAX_TOKENS,
       system: context.systemPrompt,
       messages,
@@ -185,13 +236,14 @@ export async function chat(
 
 /**
  * Simple non-streaming chat for heartbeat checks
+ * Uses Haiku by default (heartbeats are simple, cost-sensitive)
  */
 export async function simpleChat(
   userMessage: string,
   systemPrompt: string
 ): Promise<string> {
   const response = await client.messages.create({
-    model: MODEL,
+    model: HAIKU_MODEL,
     max_tokens: MAX_TOKENS,
     system: systemPrompt,
     messages: [{ role: 'user', content: userMessage }],
