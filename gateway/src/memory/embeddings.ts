@@ -7,7 +7,15 @@
 
 import OpenAI from 'openai';
 
-const client = new OpenAI();
+// Lazy initialization - client created on first use (after dotenv loads)
+let client: OpenAI | null = null;
+
+function getClient(): OpenAI {
+  if (!client) {
+    client = new OpenAI();
+  }
+  return client;
+}
 
 // Using text-embedding-3-small: 1536 dimensions, cheap, good quality
 const EMBEDDING_MODEL = 'text-embedding-3-small';
@@ -19,7 +27,7 @@ export { EMBEDDING_DIMENSIONS };
  * Embed a single text string
  */
 export async function embedText(text: string): Promise<number[]> {
-  const response = await client.embeddings.create({
+  const response = await getClient().embeddings.create({
     model: EMBEDDING_MODEL,
     input: text,
   });
@@ -33,7 +41,7 @@ export async function embedText(text: string): Promise<number[]> {
 export async function embedTexts(texts: string[]): Promise<number[][]> {
   if (texts.length === 0) return [];
   
-  const response = await client.embeddings.create({
+  const response = await getClient().embeddings.create({
     model: EMBEDDING_MODEL,
     input: texts,
   });

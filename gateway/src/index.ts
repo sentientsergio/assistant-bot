@@ -1,9 +1,17 @@
 /**
  * Gateway entry point
  * Starts the WebSocket server, Telegram bot, and heartbeat scheduler
+ * 
+ * Environment:
+ *   NODE_ENV=development  → loads .env.dev (Claire.dev)
+ *   NODE_ENV=production   → loads .env.prod (Claire.prod)
+ *   (unset)               → loads .env (legacy, defaults to prod-like)
  */
 
-import 'dotenv/config';
+// IMPORTANT: env.ts must be imported FIRST to load environment variables
+// before any other modules read from process.env
+import { NODE_ENV, ENV_LABEL } from './env.js';
+
 import { createServer } from './server.js';
 import { startHeartbeat } from './heartbeat.js';
 import { startTelegram, stopTelegram } from './channels/telegram.js';
@@ -17,7 +25,8 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_OWNER_ID = process.env.TELEGRAM_OWNER_ID;
 
 async function main() {
-  console.log('Starting assistant-bot gateway...');
+  console.log(`Starting assistant-bot gateway [${ENV_LABEL}]...`);
+  console.log(`  Environment: ${NODE_ENV}`);
   console.log(`  Port: ${PORT}`);
   console.log(`  Workspace: ${WORKSPACE_PATH}`);
 
