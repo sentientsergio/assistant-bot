@@ -102,13 +102,40 @@ Client                    Gateway
 | Canvas host for HTML | Deferred |
 | Node architecture (iOS/Android devices) | Deferred |
 
+### Two-Plane Architecture
+
+The system separates **Messaging** from **Development**:
+
+```
+┌─────────────────────────────────────────────────┐
+│  MESSAGING PLANE (logged, symmetric)            │
+│  Telegram ↔ Web Chat ↔ SMS (future)             │
+│         ↓                                       │
+│      Gateway → Conversation Log → Memory System │
+└─────────────────────────────────────────────────┘
+          ↑
+    (reads memory, writes summaries)
+          ↑
+┌─────────────────────────────────────────────────┐
+│  DEVELOPMENT PLANE (Cursor)                     │
+│  - Builds/maintains Claire                      │
+│  - Full repo access                             │
+│  - Not a peer channel - a control plane         │
+└─────────────────────────────────────────────────┘
+```
+
+**Messaging Plane**: Where Claire converses. All channels write to unified `messages.json`, which feeds the memory system.
+
+**Development Plane**: Where Claire is built and maintained. Cursor has full visibility into memory but isn't part of the conversation log.
+
 ### Channel Strategy
 
-| Channel | Purpose | Priority |
-|---------|---------|----------|
-| **CLI** | Development, local interaction | Primary |
-| **WebChat** | Local web interface, visual | Primary |
-| **Telegram** | Mobile messaging, remote access | Primary |
+| Channel | Plane | Purpose |
+|---------|-------|---------|
+| **Telegram** | Messaging | Mobile messaging, remote access |
+| **WebChat** | Messaging | Local web interface (future) |
+| **SMS** | Messaging | Text messaging (future) |
+| **Cursor** | Development | Code, maintenance, deep work |
 
 **Telegram notes:**
 - Use grammY library (~50 lines to integrate)
@@ -174,26 +201,48 @@ Before doing anything else:
 
 ## Memory System
 
-_Based on [Clawdbot Memory](https://docs.clawd.bot/concepts/memory)_
+_Based on [Clawdbot Memory](https://docs.clawd.bot/concepts/memory), extended with tiered vector architecture._
 
-### Two-Layer Architecture
+### Three-Tier Architecture
+
+| Tier | Resolution | Time Scale | Storage |
+|------|------------|------------|---------|
+| **HOT** | Full fidelity | Minutes | In-context (last 5 messages) |
+| **WARM** | Chunk-level | Days | LanceDB vector store |
+| **COLD** | Summary-level | Weeks+ | Compressed WARM (future) |
+
+**HOT Context**: Last 5 messages from unified conversation log, loaded into every prompt.
+
+**WARM (Vector Memory)**: Conversation exchanges embedded via OpenAI and stored in LanceDB. Searchable by semantic similarity + keyword (hybrid search).
+
+**COLD**: Compressed summaries of old WARM content. Same search mechanism, lower resolution. (Not yet implemented)
+
+### Conversation Log
+
+Single `conversations/messages.json` for all messaging channels:
+
+```json
+{
+  "messages": [
+    { "channel": "telegram", "role": "user", "content": "...", "timestamp": "..." },
+    { "channel": "web", "role": "assistant", "content": "...", "timestamp": "..." }
+  ]
+}
+```
+
+All messaging channels (Telegram, future web/SMS) write here. Cursor (development plane) does not.
+
+### Markdown Files (Observability Layer)
 
 **Daily logs** (`memory/YYYY-MM-DD.md`):
-- Append-only notes
-- What happened today
-- Raw context and observations
+- Human-readable digests
+- Generated from WARM content during maintenance
+- For monitoring and debugging, not memory source
 
 **Long-term memory** (`MEMORY.md`):
-- Curated, distilled
-- Decisions, preferences, durable facts
+- Curated, distilled facts
 - Updated during maintenance/heartbeats
-
-### When to Write Memory
-
-- Decisions, preferences, and durable facts → `MEMORY.md`
-- Day-to-day notes and running context → `memory/YYYY-MM-DD.md`
-- If someone says "remember this" → write it to a file
-- Mental notes don't survive session restarts; files do
+- Migrated to vector store for searchability
 
 ### Memory Philosophy
 
@@ -203,14 +252,17 @@ _Based on [Clawdbot Memory](https://docs.clawd.bot/concepts/memory)_
 
 MEMORY.md is only loaded in the main session (direct chats with your human). Not in group contexts. Contains personal context that shouldn't leak.
 
-### MVP Simplifications
+### Implementation Status
 
-| Clawdbot | assistant-bot MVP |
-|----------|-------------------|
-| Vector search with embeddings | Deferred (add when memory grows) |
-| Automatic memory flush before compaction | Implement as needed |
-| Session memory indexing | Deferred |
-| Hybrid BM25 + vector search | Deferred |
+| Feature | Status |
+|---------|--------|
+| Vector search with embeddings | ✅ LanceDB + OpenAI embeddings |
+| Hybrid BM25 + vector search | ✅ FTS index on content |
+| Unified conversation log | ✅ messages.json |
+| WARM → COLD compression | ◯ Future |
+| Fact extraction | ◯ Future |
+
+See [Tiered Memory Architecture](tiered-memory-architecture.md) for detailed design.
 
 ---
 

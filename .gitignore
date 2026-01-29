@@ -26,3 +26,6 @@ cli/dist/
 .idea/
 *.swp
 *.swo
+workspace-dev/
+.env.dev
+.env.prod

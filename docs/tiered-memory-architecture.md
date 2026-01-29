@@ -116,20 +116,29 @@ These are orthogonal. Both WARM and COLD tiers are vector-searchable; COLD just 
 
 ### HOT: Context Window
 
-**What**: Last 15-20 messages, full fidelity, unified across channels  
-**Storage**: In-memory array, prepended to every API call  
-**Cross-channel**: Merge by timestamp when user switches channels
+**What**: Last 5 messages, full fidelity, from unified conversation log  
+**Storage**: `conversations/messages.json` (unified across messaging channels)  
+**Cross-channel**: All messaging channels write to same log, naturally mixed by timestamp
 
 ```typescript
-interface HotMessage {
-  channel: "telegram" | "cursor" | "cli";
+interface Message {
+  channel: string;        // "telegram", "web", "sms" (messaging plane only)
   role: "user" | "assistant";
   content: string;
-  timestamp: Date;
+  timestamp: string;      // ISO format
+}
+
+interface ConversationLog {
+  messages: Message[];
+  lastActivity: string;
 }
 ```
 
-**Implementation**: Simple FIFO queue. When exceeds N messages, oldest roll off (they're already in WARM).
+**Two-Plane Architecture**:
+- **Messaging Plane** (Telegram, web, SMS): Writes to conversation log
+- **Development Plane** (Cursor): Does NOT write to conversation log
+
+**Implementation**: Unified `messages.json` with channel tags. Load last N messages for HOT context. Older messages remain in log (up to 100) for cross-channel awareness before being WARM-only.
 
 ---
 
@@ -302,13 +311,16 @@ time_weight(age_hours) =
 
 ## Technical Stack
 
-| Component           | Choice                | Rationale                                      |
-| ------------------- | --------------------- | ---------------------------------------------- |
-| **Embedding**       | nomic-embed-text-v1.5 | Local, free, 8192 context, outperforms ada-002 |
-| **Vector DB**       | LanceDB               | TypeScript native, file-based, hybrid search   |
-| **Dimensions**      | 384 (Matryoshka)      | Storage efficient, quality preserved           |
-| **Fact extraction** | Claude Haiku          | Cost-effective, good at structured output      |
-| **Cold storage**    | JSON files            | Simple, human-readable, git-friendly           |
+| Component           | Choice                     | Rationale                                      |
+| ------------------- | -------------------------- | ---------------------------------------------- |
+| **Embedding**       | OpenAI text-embedding-3-small | Practical, ~free at scale, no local setup   |
+| **Vector DB**       | LanceDB                    | TypeScript native, file-based, hybrid search   |
+| **Dimensions**      | 1536                       | OpenAI default dimensions                      |
+| **Hybrid search**   | LanceDB FTS + vector       | Combined semantic + keyword matching           |
+| **Fact extraction** | Claude Haiku (future)      | Cost-effective, good at structured output      |
+| **Conversation log**| JSON (messages.json)       | Simple, unified across messaging channels      |
+
+**Alternative embedding**: nomic-embed-text-v1.5 via Ollama (local, free) - can switch if cost becomes concern.
 
 **Explicitly NOT recommended**: all-MiniLM-L6-v2 (56% Top-5 accuracy in benchmarks)
 
@@ -404,24 +416,30 @@ HOT context only
 
 ## Implementation Phases
 
-### Phase 1: Foundation (Vector RAG)
+### Phase 1: Foundation (Vector RAG) ✅
 
-- [ ] Set up LanceDB with nomic-embed-text-v1.5
-- [ ] Implement 3-5 turn chunking with overlap
-- [ ] Basic semantic retrieval (no time-weighting yet)
-- [ ] Integrate into context assembly
-- [ ] Test: "What's my favorite food?" after mentioning it earlier
+- [x] Set up LanceDB (using OpenAI text-embedding-3-small instead of nomic)
+- [x] Implement chunking (user-assistant pairs per exchange)
+- [x] Basic semantic retrieval with time-weighting
+- [x] Integrate into Telegram channel context assembly
+- [x] Test: Phone number stored, cleared from HOT, retrieved from vector ✓
 
-**Validation**: System remembers information from previous sessions
+**Validation**: System remembers information purely from vector retrieval (2026-01-29)
 
-### Phase 2: Retrieval Optimization
+**Implementation notes**:
+- Using OpenAI embeddings (practical, ~free at our scale) vs nomic (requires Ollama)
+- Simple 2-turn chunking per exchange (can expand to 3-5 turn windows later)
+- Migration script ready: `gateway/scripts/migrate-markdown-to-vector.ts`
 
-- [ ] Add time-weighted scoring (lastAccessedAt tracking)
-- [ ] Implement hybrid search (semantic + BM25)
-- [ ] Add similarity threshold gating
-- [ ] Implement adaptive top-K based on score distribution
+### Phase 2: Retrieval Optimization (In Progress)
 
-**Validation**: Recent conversations rank higher; temporal queries work
+- [x] Implement hybrid search (semantic + FTS via LanceDB)
+- [x] Basic time-weighted scoring (recency weight in retrieval)
+- [x] Unified conversation log (messages.json for all messaging channels)
+- [ ] Implement lastAccessedAt tracking (touchChunks)
+- [ ] Add adaptive top-K based on score distribution
+
+**Validation**: Hybrid search working (2026-01-29). Phone number retrieved via keyword + semantic match.
 
 ### Phase 3: Fact Extraction (Inferential Curation)
 

@@ -15,6 +15,7 @@ import {
   hasRecentActivity,
   getMinutesSinceLastActivity,
 } from '../conversation.js';
+import { storeExchange, getRelevantMemories, isInitialized as isMemoryInitialized } from '../memory/index.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 
@@ -128,6 +129,16 @@ export async function startTelegram(config: TelegramConfig): Promise<Bot> {
         console.log(`[telegram] Loaded ${history.messages.length} messages from conversation history`);
       }
       
+      // Retrieve relevant memories from vector store (WARM tier)
+      if (isMemoryInitialized()) {
+        const hotContent = history.messages.map(m => m.content);
+        const memories = await getRelevantMemories(userMessage, hotContent);
+        if (memories) {
+          workspaceContext.systemPrompt += '\n\n' + memories;
+          console.log(`[telegram] Added memories to context`);
+        }
+      }
+      
       // Save user message to history
       await addMessage(workspacePath, 'telegram', 'user', userMessage);
       
@@ -151,6 +162,13 @@ export async function startTelegram(config: TelegramConfig): Promise<Bot> {
       
       // Save assistant response to history (just the text, not thinking)
       await addMessage(workspacePath, 'telegram', 'assistant', result.text);
+      
+      // Store exchange in memory (for future retrieval)
+      if (isMemoryInitialized()) {
+        storeExchange(userMessage, result.text, 'telegram').catch(err => {
+          console.error('[telegram] Failed to store exchange in memory:', err);
+        });
+      }
 
       // Send response (split if too long)
       await sendLongMessage(ctx, fullResponse);
