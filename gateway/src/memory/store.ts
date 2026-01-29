@@ -203,16 +203,27 @@ export async function searchChunks(
 
 /**
  * Update lastAccessedAt for retrieved chunks (reinforcement)
+ * This helps with time-decay scoring - frequently accessed chunks stay fresh
  */
 export async function touchChunks(ids: string[]): Promise<void> {
   if (!chunksTable || ids.length === 0) return;
   
   const now = new Date().toISOString();
-  const idList = ids.map(id => `'${id}'`).join(', ');
   
-  // LanceDB doesn't have direct update, so we need to read, modify, delete, add
-  // For now, skip this optimization - can implement later
-  console.log(`[memory] Would touch ${ids.length} chunks (not implemented yet)`);
+  try {
+    // Update each chunk's lastAccessedAt
+    // LanceDB update: read matching rows, modify, merge back
+    for (const id of ids) {
+      await chunksTable.update({
+        where: `id = '${id}'`,
+        values: { lastAccessedAt: now },
+      });
+    }
+    console.log(`[memory] Touched ${ids.length} chunks`);
+  } catch (err) {
+    // Non-fatal - just log and continue
+    console.log(`[memory] Touch failed (non-fatal): ${err}`);
+  }
 }
 
 /**
