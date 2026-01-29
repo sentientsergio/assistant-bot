@@ -185,7 +185,7 @@ export function getToolDefinitions(): Anthropic.Tool[] {
         properties: {
           path: {
             type: 'string',
-            description: 'Path to the file, relative to the workspace root. Examples: "SOUL.md", "memory/2026-01-26.md"',
+            description: 'Path to the file, relative to workspace root. Do NOT include "workspace/" prefix. Examples: "SOUL.md", "memory/2026-01-26.md", "status.json"',
           },
         },
         required: ['path'],
@@ -199,7 +199,7 @@ export function getToolDefinitions(): Anthropic.Tool[] {
         properties: {
           path: {
             type: 'string',
-            description: 'Path to the file, relative to the workspace root',
+            description: 'Path to the file, relative to workspace root. Do NOT include "workspace/" prefix. Examples: "status.json", "memory/2026-01-29.md"',
           },
           content: {
             type: 'string',
@@ -217,7 +217,7 @@ export function getToolDefinitions(): Anthropic.Tool[] {
         properties: {
           directory: {
             type: 'string',
-            description: 'Directory path relative to workspace root. Defaults to "." (workspace root)',
+            description: 'Directory path relative to workspace root. Do NOT include "workspace/" prefix. Defaults to "." (workspace root). Examples: ".", "memory"',
           },
         },
         required: [],
