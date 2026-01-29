@@ -98,6 +98,11 @@ export async function retrieveMemories(
   const ids = scored.map(c => c.id);
   await touchChunks(ids);
   
+  // Log what was retrieved for debugging
+  for (const chunk of scored) {
+    console.log(`[memory] Retrieved (score: ${chunk.combinedScore.toFixed(3)}): ${chunk.content.slice(0, 60)}...`);
+  }
+  
   // Format for return
   return scored.map(chunk => ({
     content: chunk.content,

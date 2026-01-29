@@ -236,6 +236,7 @@ export function formatAllConversationsForSummary(
   
   for (const history of otherChannels) {
     if (history.messages.length === 0) continue;
+    if (!history.channel) continue; // Skip if channel is undefined
     
     lines.push(`\n[${history.channel.toUpperCase()}]`);
     for (const msg of history.messages) {
