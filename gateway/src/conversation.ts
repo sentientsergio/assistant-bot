@@ -141,6 +141,29 @@ export function hasRecentActivity(history: ConversationHistory, withinMinutes: n
 }
 
 /**
+ * Check if there has been any contact today on this channel
+ */
+export function hasContactToday(history: ConversationHistory): boolean {
+  const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+  return history.messages.some(msg => msg.timestamp.startsWith(today));
+}
+
+/**
+ * Check if there has been any contact today across ALL channels
+ */
+export async function hasContactTodayAnyChannel(workspacePath: string): Promise<boolean> {
+  const histories = await loadAllConversations(workspacePath);
+  const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+  
+  for (const history of histories) {
+    if (history.messages.some(msg => msg.timestamp.startsWith(today))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Format conversation history for inclusion in system prompt
  */
 export function formatHistoryForPrompt(history: ConversationHistory): string {

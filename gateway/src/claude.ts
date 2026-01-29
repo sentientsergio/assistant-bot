@@ -28,6 +28,13 @@ const client = new Anthropic();
 const HAIKU_MODEL = 'claude-haiku-4-5';
 const SONNET_MODEL = 'claude-sonnet-4-5';
 const MAX_TOKENS = 4096;
+const THINKING_BUDGET = 2048; // tokens for extended thinking
+
+// Result type that includes both thinking and text
+export interface ChatResult {
+  thinking: string;
+  text: string;
+}
 
 // Triage prompt for routing decisions
 const TRIAGE_PROMPT = `You are a routing assistant. Given a user message, determine if it requires deep reasoning or is straightforward.
@@ -280,4 +287,159 @@ export async function simpleChat(
 
   const textBlock = response.content.find((block) => block.type === 'text');
   return textBlock?.type === 'text' ? textBlock.text : '';
+}
+
+/**
+ * Chat with extended thinking enabled for complex tasks
+ * Returns both thinking process and final text separately
+ * Uses triage: Sonnet gets extended thinking, Haiku stays fast
+ */
+export async function chatWithThinking(
+  userMessage: string,
+  context: WorkspaceContext,
+  workspacePath: string
+): Promise<ChatResult> {
+  // Triage to determine which model to use
+  const modelChoice = await triageMessage(userMessage);
+  const model = modelChoice === 'sonnet' ? SONNET_MODEL : HAIKU_MODEL;
+  const useThinking = modelChoice === 'sonnet';
+  
+  console.log(`[chat] Using ${model}${useThinking ? ` with extended thinking (budget: ${THINKING_BUDGET})` : ''}`);
+
+  const messages: Anthropic.MessageParam[] = [
+    { role: 'user', content: userMessage }
+  ];
+
+  let thinkingContent = '';
+
+  // Non-streaming for simpler thinking block handling
+  // Tool loop - extended thinking only for Sonnet
+  while (true) {
+    const response = await client.messages.create({
+      model,
+      max_tokens: MAX_TOKENS,
+      system: context.systemPrompt,
+      messages,
+      tools: [
+        ...getToolDefinitions(), 
+        ...getWebToolDefinitions(),
+        ...(isCalendarConfigured() ? getCalendarToolDefinitions() : []),
+      ],
+      ...(useThinking && {
+        thinking: {
+          type: 'enabled' as const,
+          budget_tokens: THINKING_BUDGET,
+        },
+      }),
+    });
+
+    // Process content blocks
+    // Note: thinking blocks are captured but NOT added to message history
+    // (they're internal to the current response, not valid for subsequent turns)
+    let toolUse: { id: string; name: string; input: unknown } | null = null;
+    const assistantContent: Anthropic.ContentBlock[] = [];
+    let turnText = ''; // Text from THIS turn only
+
+    for (const block of response.content) {
+      if (block.type === 'thinking') {
+        // Capture thinking but don't add to message history
+        thinkingContent += (thinkingContent ? '\n\n' : '') + block.thinking;
+      } else if (block.type === 'text') {
+        turnText += block.text;
+        assistantContent.push(block);
+      } else if (block.type === 'tool_use') {
+        toolUse = {
+          id: block.id,
+          name: block.name,
+          input: block.input,
+        };
+        assistantContent.push(block);
+      }
+    }
+
+    // If no tool call, we're done - return this turn's text as final response
+    if (!toolUse) {
+      if (thinkingContent) {
+        console.log(`[chat] Thinking: ${thinkingContent.slice(0, 100)}...`);
+      }
+      // Only return the final turn's text (not intermediate "Let me check..." narration)
+      return { thinking: thinkingContent, text: turnText };
+    }
+    
+    // Log intermediate text but don't include in final response
+    if (turnText) {
+      console.log(`[chat] Intermediate text (not shown to user): ${turnText.slice(0, 50)}...`);
+    }
+
+    // Execute tool
+    const toolInput = toolUse.input as ToolInput;
+    let toolResult: string;
+
+    try {
+      switch (toolUse.name) {
+        case 'file_read':
+          toolResult = await fileRead(workspacePath, toolInput.path || '');
+          break;
+        case 'file_write':
+          toolResult = await fileWrite(
+            workspacePath,
+            toolInput.path || '',
+            toolInput.content || ''
+          );
+          break;
+        case 'file_list':
+          toolResult = await fileList(workspacePath, toolInput.directory || '.');
+          break;
+        case 'schedule_heartbeat':
+          toolResult = await scheduleHeartbeat(
+            toolInput.purpose || '',
+            toolInput.scheduled_for,
+            toolInput.recurring_schedule
+          );
+          break;
+        case 'list_scheduled_heartbeats':
+          toolResult = await listHeartbeats();
+          break;
+        case 'cancel_scheduled_heartbeat':
+          toolResult = await cancelHeartbeat(toolInput.id || '');
+          break;
+        case 'web_fetch':
+          toolResult = await webFetch(toolInput.url || '');
+          break;
+        case 'calendar_list_events':
+          toolResult = await listEvents(toolInput.max_results || 10);
+          break;
+        case 'calendar_create_event':
+          toolResult = await createEvent(
+            toolInput.summary || '',
+            toolInput.start_time || '',
+            toolInput.end_time || '',
+            toolInput.description,
+            toolInput.location
+          );
+          break;
+        default:
+          toolResult = `Unknown tool: ${toolUse.name}`;
+      }
+    } catch (err) {
+      toolResult = `Error: ${err instanceof Error ? err.message : 'Unknown error'}`;
+    }
+
+    // Add assistant response and tool result to messages
+    messages.push({
+      role: 'assistant',
+      content: assistantContent,
+    });
+
+    messages.push({
+      role: 'user',
+      content: [
+        {
+          type: 'tool_result' as const,
+          tool_use_id: toolUse.id,
+          content: toolResult,
+        },
+      ],
+    });
+  }
 }

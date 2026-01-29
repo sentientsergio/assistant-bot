@@ -16,6 +16,7 @@ import {
   addMessage, 
   hasRecentActivity,
   getMinutesSinceLastActivity,
+  hasContactTodayAnyChannel,
 } from './conversation.js';
 
 const execAsync = promisify(exec);
@@ -143,6 +144,28 @@ function isQuietHours(): boolean {
 }
 
 /**
+ * Check if it's morning (8am - 11am)
+ */
+function isMorning(): boolean {
+  const hour = new Date().getHours();
+  return hour >= 8 && hour < 11;
+}
+
+/**
+ * Wrap a heartbeat prompt with morning greeting instructions
+ */
+function wrapWithMorningGreeting(prompt: string): string {
+  return `IMPORTANT: This is the FIRST contact of the day, and it's morning. Lead with warmth:
+- Start with "Good morning" or similar
+- A brief personal touch (how'd you sleep? hope you rested well, etc.)
+- THEN, if appropriate, weave in the focus below — or save it for the next message
+
+The goal is connection first, not metrics first. You're a friend saying good morning, not a fitness tracker buzzing.
+
+Focus (weave in naturally or defer): ${prompt}`;
+}
+
+/**
  * Perform a heartbeat check
  */
 async function performHeartbeat(
@@ -158,9 +181,11 @@ async function performHeartbeat(
   }
 
   try {
+    // Load conversation history
+    const history = await loadConversation(workspacePath, 'telegram');
+    
     // Check for recent conversation (skip for maintenance)
     if (!forceType) {
-      const history = await loadConversation(workspacePath, 'telegram');
       const minutesSince = getMinutesSinceLastActivity(history);
       
       if (hasRecentActivity(history, RECENT_CONVERSATION_THRESHOLD)) {
@@ -171,9 +196,22 @@ async function performHeartbeat(
       console.log(`  Last conversation: ${minutesSince}m ago`);
     }
     
+    // Check if this is first morning contact (warmth needed) - across ALL channels
+    const hadContactToday = await hasContactTodayAnyChannel(workspacePath);
+    const isFirstMorningContact = isMorning() && !hadContactToday;
+    if (isFirstMorningContact) {
+      console.log('  First morning contact (any channel) - leading with warmth');
+    }
+    
     // Select heartbeat type
     const heartbeatType = forceType || selectHeartbeatType();
     console.log(`  Heartbeat type: ${heartbeatType.type}`);
+    
+    // Prepare the prompt (wrap with morning greeting if first contact)
+    const basePrompt = heartbeatType.prompt;
+    const finalPrompt = (isFirstMorningContact && !forceType) 
+      ? wrapWithMorningGreeting(basePrompt)
+      : basePrompt;
     
     let response: string;
     
@@ -183,7 +221,7 @@ async function performHeartbeat(
       let fullResponse = '';
       
       response = await chat(
-        heartbeatType.prompt,
+        finalPrompt,
         workspaceContext,
         workspacePath,
         (delta) => { fullResponse += delta; }
@@ -195,7 +233,7 @@ async function performHeartbeat(
       let fullResponse = '';
       
       response = await chat(
-        heartbeatType.prompt,
+        finalPrompt,
         workspaceContext,
         workspacePath,
         (delta) => { fullResponse += delta; }

@@ -6,7 +6,7 @@
  */
 
 import { Bot, Context } from 'grammy';
-import { chat } from '../claude.js';
+import { chatWithThinking, ChatResult } from '../claude.js';
 import { loadWorkspaceContext } from '../workspace.js';
 import { 
   loadConversation, 
@@ -15,6 +15,8 @@ import {
   hasRecentActivity,
   getMinutesSinceLastActivity,
 } from '../conversation.js';
+import * as fs from 'fs/promises';
+import * as path from 'path';
 
 let bot: Bot | null = null;
 let ownerChatId: number | null = null;
@@ -23,6 +25,55 @@ interface TelegramConfig {
   token: string;
   ownerId: number;
   workspacePath: string;
+}
+
+/**
+ * Get the show_thinking preference from status.json
+ */
+async function getShowThinking(workspacePath: string): Promise<boolean> {
+  try {
+    const statusPath = path.join(workspacePath, 'status.json');
+    const content = await fs.readFile(statusPath, 'utf-8');
+    const status = JSON.parse(content);
+    return status.preferences?.show_thinking ?? false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Set the show_thinking preference in status.json
+ */
+async function setShowThinking(workspacePath: string, value: boolean): Promise<void> {
+  const statusPath = path.join(workspacePath, 'status.json');
+  const content = await fs.readFile(statusPath, 'utf-8');
+  const status = JSON.parse(content);
+  
+  if (!status.preferences) {
+    status.preferences = {};
+  }
+  status.preferences.show_thinking = value;
+  
+  await fs.writeFile(statusPath, JSON.stringify(status, null, 2));
+  console.log(`[telegram] Set show_thinking to ${value}`);
+}
+
+/**
+ * Check if a message is a thinking toggle command
+ * Returns: 'show', 'hide', or null
+ */
+function parseThinkingCommand(message: string): 'show' | 'hide' | null {
+  const lower = message.toLowerCase().trim();
+  
+  // Natural language patterns
+  if (lower.match(/\b(show|enable|turn on)\b.*thinking/i)) {
+    return 'show';
+  }
+  if (lower.match(/\b(hide|disable|turn off)\b.*thinking/i)) {
+    return 'hide';
+  }
+  
+  return null;
 }
 
 /**
@@ -48,6 +99,19 @@ export async function startTelegram(config: TelegramConfig): Promise<Bot> {
     const userMessage = ctx.message.text;
     console.log(`[telegram] Received: "${userMessage.substring(0, 50)}..."`);
 
+    // Check for thinking toggle commands first
+    const thinkingCommand = parseThinkingCommand(userMessage);
+    if (thinkingCommand) {
+      const newValue = thinkingCommand === 'show';
+      await setShowThinking(workspacePath, newValue);
+      await ctx.reply(
+        newValue 
+          ? "🧠 Thinking mode enabled. I'll show you my reasoning process."
+          : "🧠 Thinking mode disabled. I'll just show you my responses."
+      );
+      return;
+    }
+
     // Show typing indicator
     await ctx.replyWithChatAction('typing');
 
@@ -67,20 +131,31 @@ export async function startTelegram(config: TelegramConfig): Promise<Bot> {
       // Save user message to history
       await addMessage(workspacePath, 'telegram', 'user', userMessage);
       
-      // Collect full response (Telegram doesn't support true streaming)
-      let fullResponse = '';
+      // Get response with extended thinking
+      const result: ChatResult = await chatWithThinking(
+        userMessage, 
+        workspaceContext, 
+        workspacePath
+      );
       
-      await chat(userMessage, workspaceContext, workspacePath, (delta) => {
-        fullResponse += delta;
-      });
+      // Check if we should show thinking
+      const showThinking = await getShowThinking(workspacePath);
       
-      // Save assistant response to history
-      await addMessage(workspacePath, 'telegram', 'assistant', fullResponse);
+      // Format response based on preference
+      let fullResponse: string;
+      if (showThinking && result.thinking) {
+        fullResponse = `<thinking>\n${result.thinking}\n</thinking>\n\n${result.text}`;
+      } else {
+        fullResponse = result.text;
+      }
+      
+      // Save assistant response to history (just the text, not thinking)
+      await addMessage(workspacePath, 'telegram', 'assistant', result.text);
 
       // Send response (split if too long)
       await sendLongMessage(ctx, fullResponse);
       
-      console.log(`[telegram] Sent response (${fullResponse.length} chars)`);
+      console.log(`[telegram] Sent response (${fullResponse.length} chars, thinking: ${showThinking})`);
       
     } catch (err) {
       console.error('[telegram] Error:', err);
