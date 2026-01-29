@@ -98,7 +98,7 @@ Status hasn't been updated in over ${status.stale_after_hours} hours. Before div
 - Movement: any activity?
 - Fast status: in window, fasting, etc.?
 
-Update workspace/status.json with the response.
+Update status.json with the response.
 
 ---
 `;
