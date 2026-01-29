@@ -9,7 +9,10 @@ import { searchChunks, touchChunks, ScoredChunk } from './store.js';
 
 // Retrieval parameters
 const DEFAULT_TOP_K = 5;
+const MIN_TOP_K = 2;              // Always return at least this many if available
+const MAX_TOP_K = 10;             // Never return more than this
 const SIMILARITY_THRESHOLD = 0.3; // Minimum similarity to include
+const SCORE_GAP_THRESHOLD = 0.15; // If score drops by this much, consider cutting off
 const RECENCY_WEIGHT = 0.3;       // 30% recency, 70% semantic
 const DECAY_RATE = 0.01;          // ~1 week half-life
 
@@ -31,6 +34,45 @@ function computeRecency(lastAccessedAt: string): number {
   
   // Exponential decay: score = (1 - decay_rate) ^ hours
   return Math.pow(1 - DECAY_RATE, hoursSince);
+}
+
+/**
+ * Compute adaptive top-K based on score distribution
+ * Returns results up to a natural gap in scores, or the requested topK
+ */
+function adaptiveTopK<T extends { combinedScore: number }>(
+  results: T[],
+  requestedK: number
+): T[] {
+  if (results.length <= MIN_TOP_K) return results;
+  
+  // Always include at least MIN_TOP_K
+  const output: T[] = results.slice(0, MIN_TOP_K);
+  
+  // Check remaining results for score gaps
+  for (let i = MIN_TOP_K; i < Math.min(results.length, MAX_TOP_K); i++) {
+    const current = results[i];
+    const previous = results[i - 1];
+    
+    // If there's a big gap in scores, stop here
+    const gap = previous.combinedScore - current.combinedScore;
+    if (gap > SCORE_GAP_THRESHOLD) {
+      console.log(`[memory] Adaptive cutoff at ${i} results (gap: ${gap.toFixed(3)})`);
+      break;
+    }
+    
+    // If we've hit the requested K, check if next item is similar enough to include
+    if (output.length >= requestedK) {
+      // Only continue if score is very close to previous
+      if (gap > SCORE_GAP_THRESHOLD / 2) {
+        break;
+      }
+    }
+    
+    output.push(current);
+  }
+  
+  return output;
 }
 
 /**
@@ -66,7 +108,7 @@ export async function retrieveMemories(
   const results = await searchChunks(query, topK * 2); // Get extra for filtering
   
   // Compute combined scores and filter
-  const scored = results
+  const scoredAndFiltered = results
     .map(chunk => {
       const recency = computeRecency(chunk.lastAccessedAt);
       const combinedScore = (chunk.score * (1 - RECENCY_WEIGHT)) + (recency * RECENCY_WEIGHT);
@@ -91,8 +133,10 @@ export async function retrieveMemories(
       
       return true;
     })
-    .sort((a, b) => b.combinedScore - a.combinedScore)
-    .slice(0, topK);
+    .sort((a, b) => b.combinedScore - a.combinedScore);
+  
+  // Apply adaptive top-K based on score distribution
+  const scored = adaptiveTopK(scoredAndFiltered, topK);
   
   // Touch retrieved chunks to reinforce them
   const ids = scored.map(c => c.id);

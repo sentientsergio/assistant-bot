@@ -431,15 +431,20 @@ HOT context only
 - Simple 2-turn chunking per exchange (can expand to 3-5 turn windows later)
 - Migration script ready: `gateway/scripts/migrate-markdown-to-vector.ts`
 
-### Phase 2: Retrieval Optimization (In Progress)
+### Phase 2: Retrieval Optimization ✅
 
 - [x] Implement hybrid search (semantic + FTS via LanceDB)
 - [x] Basic time-weighted scoring (recency weight in retrieval)
 - [x] Unified conversation log (messages.json for all messaging channels)
-- [ ] Implement lastAccessedAt tracking (touchChunks)
-- [ ] Add adaptive top-K based on score distribution
+- [x] Implement lastAccessedAt tracking (touchChunks)
+- [x] Add adaptive top-K based on score distribution
 
 **Validation**: Hybrid search working (2026-01-29). Phone number retrieved via keyword + semantic match.
+
+**Implementation notes (2026-01-29)**:
+- touchChunks uses LanceDB update() to refresh lastAccessedAt on retrieved chunks
+- adaptiveTopK analyzes score gaps: cuts off when score drops >0.15 between results
+- MIN_TOP_K=2, MAX_TOP_K=10, DEFAULT_TOP_K=5
 
 ### Phase 3: Fact Extraction (Inferential Curation)
 
