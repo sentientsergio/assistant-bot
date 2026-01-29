@@ -1,61 +1,54 @@
 /**
  * Conversation Store
  * 
- * Manages rolling conversation history for stateful exchanges.
- * History is stored per-channel and pruned after 24 hours.
+ * Manages unified conversation history across all messaging channels.
+ * Single messages.json file with channel tags per message.
+ * 
+ * Note: This is for the MESSAGING PLANE (Telegram, web, SMS).
+ * Cursor is the DEVELOPMENT PLANE and does not participate in this log.
  */
 
-import { readFile, writeFile, mkdir, readdir } from 'fs/promises';
+import { readFile, writeFile, mkdir } from 'fs/promises';
 import { join, dirname } from 'path';
 
 export interface Message {
+  channel: string;        // Which messaging channel (telegram, web, sms)
   role: 'user' | 'assistant';
   content: string;
-  timestamp: string; // ISO format
+  timestamp: string;      // ISO format
 }
 
-export interface ConversationHistory {
-  channel: string;
+export interface ConversationLog {
   messages: Message[];
-  lastActivity: string; // ISO format
+  lastActivity: string;   // ISO format
 }
 
 const HISTORY_TTL_HOURS = 24;
-const MAX_MESSAGES = 5; // Keep minimal for continuity, control cost
+const MAX_MESSAGES_HOT = 5;     // Messages loaded into HOT context
+const MAX_MESSAGES_STORE = 100; // Messages kept in log before pruning to WARM-only
 
 /**
- * Get the path to a channel's conversation file
+ * Get the path to the unified conversation log
  */
-function getConversationPath(workspacePath: string, channel: string): string {
-  return join(workspacePath, 'conversations', `${channel}.json`);
+function getConversationPath(workspacePath: string): string {
+  return join(workspacePath, 'conversations', 'messages.json');
 }
 
 /**
- * Load conversation history for a channel
+ * Load the full conversation log
  */
-export async function loadConversation(
-  workspacePath: string,
-  channel: string
-): Promise<ConversationHistory> {
-  const path = getConversationPath(workspacePath, channel);
+export async function loadConversationLog(
+  workspacePath: string
+): Promise<ConversationLog> {
+  const path = getConversationPath(workspacePath);
   
   try {
     const content = await readFile(path, 'utf-8');
-    const history: ConversationHistory = JSON.parse(content);
-    
-    // Prune old messages
-    const pruned = pruneOldMessages(history);
-    
-    // Save if we pruned anything
-    if (pruned.messages.length !== history.messages.length) {
-      await saveConversation(workspacePath, pruned);
-    }
-    
-    return pruned;
+    const log: ConversationLog = JSON.parse(content);
+    return log;
   } catch {
-    // No history exists yet
+    // No log exists yet
     return {
-      channel,
       messages: [],
       lastActivity: new Date().toISOString(),
     };
@@ -63,64 +56,105 @@ export async function loadConversation(
 }
 
 /**
- * Save conversation history
+ * Save the conversation log
  */
-export async function saveConversation(
+async function saveConversationLog(
   workspacePath: string,
-  history: ConversationHistory
+  log: ConversationLog
 ): Promise<void> {
-  const path = getConversationPath(workspacePath, history.channel);
-  
-  // Ensure directory exists
+  const path = getConversationPath(workspacePath);
   await mkdir(dirname(path), { recursive: true });
-  
-  await writeFile(path, JSON.stringify(history, null, 2), 'utf-8');
+  await writeFile(path, JSON.stringify(log, null, 2), 'utf-8');
 }
 
 /**
- * Add a message to conversation history
+ * Add a message to the conversation log
  */
 export async function addMessage(
   workspacePath: string,
   channel: string,
   role: 'user' | 'assistant',
   content: string
-): Promise<ConversationHistory> {
-  const history = await loadConversation(workspacePath, channel);
+): Promise<ConversationLog> {
+  const log = await loadConversationLog(workspacePath);
   
   const message: Message = {
+    channel,
     role,
     content,
     timestamp: new Date().toISOString(),
   };
   
-  history.messages.push(message);
-  history.lastActivity = message.timestamp;
+  log.messages.push(message);
+  log.lastActivity = message.timestamp;
   
-  await saveConversation(workspacePath, history);
+  // Prune if over storage limit (keeps recent messages)
+  if (log.messages.length > MAX_MESSAGES_STORE) {
+    log.messages = log.messages.slice(-MAX_MESSAGES_STORE);
+  }
   
-  return history;
+  await saveConversationLog(workspacePath, log);
+  return log;
 }
 
 /**
- * Remove messages older than TTL and limit to max count
+ * Get recent messages for HOT context
+ * Can filter by channel or get all channels mixed
  */
-function pruneOldMessages(history: ConversationHistory): ConversationHistory {
+export function getRecentMessages(
+  log: ConversationLog,
+  options: {
+    channel?: string;     // Filter to specific channel, or all if undefined
+    limit?: number;       // Max messages to return
+    withinHours?: number; // Only messages within N hours
+  } = {}
+): Message[] {
+  const { channel, limit = MAX_MESSAGES_HOT, withinHours = HISTORY_TTL_HOURS } = options;
+  
   const cutoff = new Date();
-  cutoff.setHours(cutoff.getHours() - HISTORY_TTL_HOURS);
+  cutoff.setHours(cutoff.getHours() - withinHours);
   const cutoffISO = cutoff.toISOString();
   
-  // First filter by time
-  let filtered = history.messages.filter(msg => msg.timestamp > cutoffISO);
+  let filtered = log.messages.filter(msg => msg.timestamp > cutoffISO);
   
-  // Then limit by count (keep most recent)
-  if (filtered.length > MAX_MESSAGES) {
-    filtered = filtered.slice(-MAX_MESSAGES);
+  if (channel) {
+    filtered = filtered.filter(msg => msg.channel === channel);
   }
   
+  // Return most recent N
+  return filtered.slice(-limit);
+}
+
+/**
+ * Legacy compatibility: Load conversation for a specific channel
+ * Returns a ConversationHistory-like object for backwards compatibility
+ */
+export interface ConversationHistory {
+  channel: string;
+  messages: Array<{ role: 'user' | 'assistant'; content: string; timestamp: string }>;
+  lastActivity: string;
+}
+
+export async function loadConversation(
+  workspacePath: string,
+  channel: string
+): Promise<ConversationHistory> {
+  const log = await loadConversationLog(workspacePath);
+  const messages = getRecentMessages(log, { channel });
+  
+  // Convert to legacy format (without channel field per message)
+  const legacyMessages = messages.map(m => ({
+    role: m.role,
+    content: m.content,
+    timestamp: m.timestamp,
+  }));
+  
+  const lastMsg = messages[messages.length - 1];
+  
   return {
-    ...history,
-    messages: filtered,
+    channel,
+    messages: legacyMessages,
+    lastActivity: lastMsg?.timestamp || log.lastActivity,
   };
 }
 
@@ -128,6 +162,7 @@ function pruneOldMessages(history: ConversationHistory): ConversationHistory {
  * Get time since last activity (in minutes)
  */
 export function getMinutesSinceLastActivity(history: ConversationHistory): number {
+  if (!history.lastActivity) return Infinity;
   const last = new Date(history.lastActivity);
   const now = new Date();
   return Math.floor((now.getTime() - last.getTime()) / (1000 * 60));
@@ -141,26 +176,12 @@ export function hasRecentActivity(history: ConversationHistory, withinMinutes: n
 }
 
 /**
- * Check if there has been any contact today on this channel
- */
-export function hasContactToday(history: ConversationHistory): boolean {
-  const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
-  return history.messages.some(msg => msg.timestamp.startsWith(today));
-}
-
-/**
- * Check if there has been any contact today across ALL channels
+ * Check if there has been any contact today on any channel
  */
 export async function hasContactTodayAnyChannel(workspacePath: string): Promise<boolean> {
-  const histories = await loadAllConversations(workspacePath);
+  const log = await loadConversationLog(workspacePath);
   const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
-  
-  for (const history of histories) {
-    if (history.messages.some(msg => msg.timestamp.startsWith(today))) {
-      return true;
-    }
-  }
-  return false;
+  return log.messages.some(msg => msg.timestamp.startsWith(today));
 }
 
 /**
@@ -186,41 +207,89 @@ export function formatHistoryForPrompt(history: ConversationHistory): string {
 }
 
 /**
- * Load all conversation histories from all channels
+ * Format recent messages from all channels for cross-channel awareness
+ */
+export async function formatCrossChannelContext(
+  workspacePath: string,
+  excludeChannel?: string,
+  limit: number = 10
+): Promise<string> {
+  const log = await loadConversationLog(workspacePath);
+  
+  // Get recent messages from OTHER channels
+  let messages = getRecentMessages(log, { limit: limit * 2 });
+  
+  if (excludeChannel) {
+    messages = messages.filter(m => m.channel !== excludeChannel);
+  }
+  
+  if (messages.length === 0) {
+    return '';
+  }
+  
+  // Take most recent
+  messages = messages.slice(-limit);
+  
+  const lines: string[] = [];
+  
+  for (const msg of messages) {
+    const time = new Date(msg.timestamp).toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    const channelTag = `[${msg.channel.toUpperCase()}]`;
+    const role = msg.role === 'user' ? 'Sergio' : 'Claire';
+    const content = msg.content.length > 200 
+      ? msg.content.slice(0, 200) + '...' 
+      : msg.content;
+    lines.push(`${channelTag} ${time} ${role}: ${content}`);
+  }
+  
+  return lines.join('\n');
+}
+
+/**
+ * Legacy: Load all conversations (now just returns the unified log split by channel)
  */
 export async function loadAllConversations(
   workspacePath: string
 ): Promise<ConversationHistory[]> {
-  const conversationsDir = join(workspacePath, 'conversations');
+  const log = await loadConversationLog(workspacePath);
   
-  try {
-    const files = await readdir(conversationsDir);
-    const jsonFiles = files.filter(f => f.endsWith('.json'));
-    
-    const histories: ConversationHistory[] = [];
-    
-    for (const file of jsonFiles) {
-      try {
-        const content = await readFile(join(conversationsDir, file), 'utf-8');
-        const history: ConversationHistory = JSON.parse(content);
-        const pruned = pruneOldMessages(history);
-        if (pruned.messages.length > 0) {
-          histories.push(pruned);
-        }
-      } catch {
-        // Skip invalid files
-      }
+  // Group messages by channel
+  const byChannel = new Map<string, Message[]>();
+  
+  for (const msg of log.messages) {
+    if (!msg.channel) continue;
+    if (!byChannel.has(msg.channel)) {
+      byChannel.set(msg.channel, []);
     }
-    
-    return histories;
-  } catch {
-    // Directory doesn't exist yet
-    return [];
+    byChannel.get(msg.channel)!.push(msg);
   }
+  
+  // Convert to ConversationHistory format
+  const histories: ConversationHistory[] = [];
+  
+  for (const [channel, messages] of byChannel) {
+    const recent = messages.slice(-MAX_MESSAGES_HOT);
+    const lastMsg = recent[recent.length - 1];
+    
+    histories.push({
+      channel,
+      messages: recent.map(m => ({
+        role: m.role,
+        content: m.content,
+        timestamp: m.timestamp,
+      })),
+      lastActivity: lastMsg?.timestamp || log.lastActivity,
+    });
+  }
+  
+  return histories;
 }
 
 /**
- * Format all conversations for cross-channel summarization
+ * Legacy: Format all conversations for summary
  */
 export function formatAllConversationsForSummary(
   histories: ConversationHistory[],
@@ -236,7 +305,7 @@ export function formatAllConversationsForSummary(
   
   for (const history of otherChannels) {
     if (history.messages.length === 0) continue;
-    if (!history.channel) continue; // Skip if channel is undefined
+    if (!history.channel) continue;
     
     lines.push(`\n[${history.channel.toUpperCase()}]`);
     for (const msg of history.messages) {
@@ -245,7 +314,6 @@ export function formatAllConversationsForSummary(
         minute: '2-digit',
       });
       const role = msg.role === 'user' ? 'Sergio' : 'Claire';
-      // Truncate long messages for summarization
       const content = msg.content.length > 200 
         ? msg.content.slice(0, 200) + '...' 
         : msg.content;
