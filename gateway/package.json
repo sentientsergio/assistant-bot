@@ -10,7 +10,8 @@
     "start:dev": "NODE_ENV=development node dist/index.js",
     "start:prod": "NODE_ENV=production node dist/index.js",
     "dev:clone": "bash scripts/dev-clone.sh",
-    "dev:wipe": "bash scripts/dev-wipe.sh"
+    "dev:wipe": "bash scripts/dev-wipe.sh",
+    "test:memory": "npx tsx scripts/test-memory.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

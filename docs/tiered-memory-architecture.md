@@ -122,10 +122,10 @@ These are orthogonal. Both WARM and COLD tiers are vector-searchable; COLD just 
 
 ```typescript
 interface Message {
-  channel: string;        // "telegram", "web", "sms" (messaging plane only)
+  channel: string; // "telegram", "web", "sms" (messaging plane only)
   role: "user" | "assistant";
   content: string;
-  timestamp: string;      // ISO format
+  timestamp: string; // ISO format
 }
 
 interface ConversationLog {
@@ -135,6 +135,7 @@ interface ConversationLog {
 ```
 
 **Two-Plane Architecture**:
+
 - **Messaging Plane** (Telegram, web, SMS): Writes to conversation log
 - **Development Plane** (Cursor): Does NOT write to conversation log
 
@@ -311,14 +312,14 @@ time_weight(age_hours) =
 
 ## Technical Stack
 
-| Component           | Choice                     | Rationale                                      |
-| ------------------- | -------------------------- | ---------------------------------------------- |
-| **Embedding**       | OpenAI text-embedding-3-small | Practical, ~free at scale, no local setup   |
-| **Vector DB**       | LanceDB                    | TypeScript native, file-based, hybrid search   |
-| **Dimensions**      | 1536                       | OpenAI default dimensions                      |
-| **Hybrid search**   | LanceDB FTS + vector       | Combined semantic + keyword matching           |
-| **Fact extraction** | Claude Haiku (future)      | Cost-effective, good at structured output      |
-| **Conversation log**| JSON (messages.json)       | Simple, unified across messaging channels      |
+| Component            | Choice                        | Rationale                                    |
+| -------------------- | ----------------------------- | -------------------------------------------- |
+| **Embedding**        | OpenAI text-embedding-3-small | Practical, ~free at scale, no local setup    |
+| **Vector DB**        | LanceDB                       | TypeScript native, file-based, hybrid search |
+| **Dimensions**       | 1536                          | OpenAI default dimensions                    |
+| **Hybrid search**    | LanceDB FTS + vector          | Combined semantic + keyword matching         |
+| **Fact extraction**  | Claude Haiku (future)         | Cost-effective, good at structured output    |
+| **Conversation log** | JSON (messages.json)          | Simple, unified across messaging channels    |
 
 **Alternative embedding**: nomic-embed-text-v1.5 via Ollama (local, free) - can switch if cost becomes concern.
 
@@ -427,6 +428,7 @@ HOT context only
 **Validation**: System remembers information purely from vector retrieval (2026-01-29)
 
 **Implementation notes**:
+
 - Using OpenAI embeddings (practical, ~free at our scale) vs nomic (requires Ollama)
 - Simple 2-turn chunking per exchange (can expand to 3-5 turn windows later)
 - Migration script ready: `gateway/scripts/migrate-markdown-to-vector.ts`
@@ -442,6 +444,7 @@ HOT context only
 **Validation**: Hybrid search working (2026-01-29). Phone number retrieved via keyword + semantic match.
 
 **Implementation notes (2026-01-29)**:
+
 - touchChunks uses LanceDB update() to refresh lastAccessedAt on retrieved chunks
 - adaptiveTopK analyzes score gaps: cuts off when score drops >0.15 between results
 - MIN_TOP_K=2, MAX_TOP_K=10, DEFAULT_TOP_K=5
