@@ -9,6 +9,7 @@ import { startHeartbeat } from './heartbeat.js';
 import { startTelegram, stopTelegram } from './channels/telegram.js';
 import { initScheduledHeartbeats } from './scheduled-heartbeats.js';
 import { startWebhookServer, registerDefaultHandler } from './webhook.js';
+import { initMemoryStore } from './memory/index.js';
 
 const PORT = parseInt(process.env.GATEWAY_PORT || '18789', 10);
 const WORKSPACE_PATH = process.env.WORKSPACE_PATH || '../workspace';
@@ -19,6 +20,15 @@ async function main() {
   console.log('Starting assistant-bot gateway...');
   console.log(`  Port: ${PORT}`);
   console.log(`  Workspace: ${WORKSPACE_PATH}`);
+
+  // Initialize memory store
+  try {
+    await initMemoryStore(WORKSPACE_PATH);
+    console.log('  Memory: initialized');
+  } catch (err) {
+    console.error('  Memory: failed to initialize', err);
+    // Continue without memory - graceful degradation
+  }
 
   // Start WebSocket server
   const server = createServer(PORT, WORKSPACE_PATH);

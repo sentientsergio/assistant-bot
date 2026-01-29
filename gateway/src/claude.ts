@@ -311,6 +311,7 @@ export async function chatWithThinking(
   ];
 
   let thinkingContent = '';
+  let lastNonEmptyText = ''; // Fallback if final turn has no text
 
   // Non-streaming for simpler thinking block handling
   // Tool loop - extended thinking only for Sonnet
@@ -362,13 +363,15 @@ export async function chatWithThinking(
       if (thinkingContent) {
         console.log(`[chat] Thinking: ${thinkingContent.slice(0, 100)}...`);
       }
-      // Only return the final turn's text (not intermediate "Let me check..." narration)
-      return { thinking: thinkingContent, text: turnText };
+      // Use this turn's text, or fall back to last non-empty text from tool loop
+      const finalText = turnText || lastNonEmptyText;
+      return { thinking: thinkingContent, text: finalText };
     }
     
-    // Log intermediate text but don't include in final response
+    // Save non-empty text as fallback (in case final turn has no text)
     if (turnText) {
-      console.log(`[chat] Intermediate text (not shown to user): ${turnText.slice(0, 50)}...`);
+      lastNonEmptyText = turnText;
+      console.log(`[chat] Intermediate text (saved as fallback): ${turnText.slice(0, 50)}...`);
     }
 
     // Execute tool
