@@ -9,6 +9,7 @@ import { join, resolve } from 'path';
 import Anthropic from '@anthropic-ai/sdk';
 import type { WorkspaceContext } from './claude.js';
 import { loadAllConversations, formatAllConversationsForSummary } from './conversation.js';
+import { NODE_ENV, ENV_LABEL } from './env.js';
 
 const HAIKU_MODEL = 'claude-haiku-4-5';
 
@@ -239,10 +240,20 @@ export async function loadWorkspaceContext(
 function buildSystemPrompt(files: WorkspaceFile[], crossChannelSummary?: string, statusContext?: string): string {
   const sections: string[] = [];
 
+  // Add environment context for dev instances
+  const envContext = NODE_ENV === 'development' 
+    ? `\n**⚠️ You are running as the DEVELOPMENT instance (Claire.dev).**
+This is a testing/development environment. Your identity files say "Claire" but you are Claire.dev.
+- You can be experimental
+- Changes here don't affect production Claire
+- You may encounter bugs or incomplete features
+- Your user is testing new capabilities with you\n`
+    : '';
+
   sections.push(`You are an AI assistant with persistent identity and memory.
 Your workspace contains files that define who you are and what you remember.
 Read these files carefully - they are your continuity across sessions.
-
+${envContext}
 Current date: ${new Date().toLocaleDateString('en-US', { 
   weekday: 'long', 
   year: 'numeric', 
