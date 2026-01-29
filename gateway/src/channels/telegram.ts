@@ -202,6 +202,103 @@ export async function startTelegram(config: TelegramConfig): Promise<Bot> {
     );
   });
 
+  // Handle document attachments
+  bot.on('message:document', async (ctx) => {
+    const doc = ctx.message.document;
+    const caption = ctx.message.caption || '';
+    
+    console.log(`[telegram] Received document: ${doc.file_name} (${doc.mime_type})`);
+    
+    // Show typing indicator
+    await ctx.replyWithChatAction('typing');
+    
+    try {
+      // Load workspace context
+      const workspaceContext = await loadWorkspaceContext(workspacePath, 'telegram');
+      const history = await loadConversation(workspacePath, 'telegram');
+      const historyPrompt = formatHistoryForPrompt(history);
+      
+      if (historyPrompt) {
+        workspaceContext.systemPrompt += '\n\n' + historyPrompt;
+      }
+      
+      // Build message describing the attachment
+      const userMessage = caption 
+        ? `[Attached document: ${doc.file_name} (${doc.mime_type})]\n\n${caption}`
+        : `[Attached document: ${doc.file_name} (${doc.mime_type})]\n\n(User shared this document without additional text. Acknowledge receipt and ask if they want to discuss it, or note that you cannot yet read document contents directly.)`;
+      
+      // Save to history
+      await addMessage(workspacePath, 'telegram', 'user', userMessage);
+      
+      // Get response
+      const result: ChatResult = await chatWithThinking(
+        userMessage, 
+        workspaceContext, 
+        workspacePath
+      );
+      
+      // Save response and send
+      await addMessage(workspacePath, 'telegram', 'assistant', result.text);
+      
+      const showThinking = await getShowThinking(workspacePath);
+      const fullResponse = showThinking && result.thinking 
+        ? `<thinking>\n${result.thinking}\n</thinking>\n\n${result.text}`
+        : result.text;
+      
+      await sendLongMessage(ctx, fullResponse);
+      console.log(`[telegram] Responded to document (${fullResponse.length} chars)`);
+      
+    } catch (err) {
+      console.error('[telegram] Error handling document:', err);
+      await ctx.reply('Sorry, I encountered an error processing that document. Please try again.');
+    }
+  });
+
+  // Handle photo attachments
+  bot.on('message:photo', async (ctx) => {
+    const caption = ctx.message.caption || '';
+    
+    console.log(`[telegram] Received photo`);
+    
+    await ctx.replyWithChatAction('typing');
+    
+    try {
+      const workspaceContext = await loadWorkspaceContext(workspacePath, 'telegram');
+      const history = await loadConversation(workspacePath, 'telegram');
+      const historyPrompt = formatHistoryForPrompt(history);
+      
+      if (historyPrompt) {
+        workspaceContext.systemPrompt += '\n\n' + historyPrompt;
+      }
+      
+      const userMessage = caption 
+        ? `[Attached photo]\n\n${caption}`
+        : `[Attached photo]\n\n(User shared a photo without additional text. Acknowledge receipt. Note that you cannot yet see image contents directly.)`;
+      
+      await addMessage(workspacePath, 'telegram', 'user', userMessage);
+      
+      const result: ChatResult = await chatWithThinking(
+        userMessage, 
+        workspaceContext, 
+        workspacePath
+      );
+      
+      await addMessage(workspacePath, 'telegram', 'assistant', result.text);
+      
+      const showThinking = await getShowThinking(workspacePath);
+      const fullResponse = showThinking && result.thinking 
+        ? `<thinking>\n${result.thinking}\n</thinking>\n\n${result.text}`
+        : result.text;
+      
+      await sendLongMessage(ctx, fullResponse);
+      console.log(`[telegram] Responded to photo (${fullResponse.length} chars)`);
+      
+    } catch (err) {
+      console.error('[telegram] Error handling photo:', err);
+      await ctx.reply('Sorry, I encountered an error processing that photo. Please try again.');
+    }
+  });
+
   // Start the bot
   console.log('[telegram] Starting bot...');
   
