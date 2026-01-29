@@ -128,7 +128,7 @@ export async function chat(
     { role: 'user', content: userMessage }
   ];
 
-  let fullResponse = '';
+  let lastNonEmptyText = ''; // Fallback: keep last non-empty text in case final turn is empty
 
   // Loop to handle tool calls
   while (true) {
@@ -164,8 +164,11 @@ export async function chat(
       } else if (event.type === 'content_block_delta') {
         if (event.delta.type === 'text_delta') {
           currentText += event.delta.text;
-          fullResponse += event.delta.text;
-          onDelta(event.delta.text);
+          // Don't stream intermediate narration to callback during tool loops
+          // Only stream if this might be the final response
+          if (!toolUse) {
+            onDelta(event.delta.text);
+          }
         } else if (event.delta.type === 'input_json_delta') {
           inputJson += event.delta.partial_json;
         }
@@ -178,9 +181,16 @@ export async function chat(
       }
     }
 
-    // If no tool was called, we're done
+    // Track last non-empty text as fallback
+    if (currentText.trim()) {
+      lastNonEmptyText = currentText;
+    }
+
+    // If no tool was called, we're done - return ONLY this turn's text
     if (!toolUse) {
-      return fullResponse;
+      // If this turn had text, return it; otherwise use fallback
+      const finalText = currentText.trim() ? currentText : lastNonEmptyText;
+      return finalText;
     }
 
     // Execute the tool
@@ -191,8 +201,8 @@ export async function chat(
       // Tool JSON was incomplete/malformed - likely context limit hit
       // Return what we have so far instead of crashing
       console.error('Failed to parse tool input JSON, returning partial response:', toolUse.input);
-      if (fullResponse.trim()) {
-        return fullResponse;
+      if (lastNonEmptyText.trim()) {
+        return lastNonEmptyText;
       }
       return "I tried to do something but hit a limit. Could you try a shorter message or ask again?";
     }
