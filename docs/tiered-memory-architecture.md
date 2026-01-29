@@ -404,15 +404,20 @@ HOT context only
 
 ## Implementation Phases
 
-### Phase 1: Foundation (Vector RAG)
+### Phase 1: Foundation (Vector RAG) ✅
 
-- [ ] Set up LanceDB with nomic-embed-text-v1.5
-- [ ] Implement 3-5 turn chunking with overlap
-- [ ] Basic semantic retrieval (no time-weighting yet)
-- [ ] Integrate into context assembly
-- [ ] Test: "What's my favorite food?" after mentioning it earlier
+- [x] Set up LanceDB (using OpenAI text-embedding-3-small instead of nomic)
+- [x] Implement chunking (user-assistant pairs per exchange)
+- [x] Basic semantic retrieval with time-weighting
+- [x] Integrate into Telegram channel context assembly
+- [x] Test: Phone number stored, cleared from HOT, retrieved from vector ✓
 
-**Validation**: System remembers information from previous sessions
+**Validation**: System remembers information purely from vector retrieval (2026-01-29)
+
+**Implementation notes**:
+- Using OpenAI embeddings (practical, ~free at our scale) vs nomic (requires Ollama)
+- Simple 2-turn chunking per exchange (can expand to 3-5 turn windows later)
+- Migration script ready: `gateway/scripts/migrate-markdown-to-vector.ts`
 
 ### Phase 2: Retrieval Optimization
 
