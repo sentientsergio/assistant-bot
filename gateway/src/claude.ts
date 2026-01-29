@@ -22,7 +22,15 @@ import {
   isCalendarConfigured 
 } from './tools/calendar.js';
 
-const client = new Anthropic();
+// Lazy initialization - client created on first use (after dotenv loads)
+let client: Anthropic | null = null;
+
+function getClient(): Anthropic {
+  if (!client) {
+    client = new Anthropic();
+  }
+  return client;
+}
 
 // Model configuration
 const HAIKU_MODEL = 'claude-haiku-4-5';
@@ -61,7 +69,7 @@ Reply with exactly one word: SIMPLE or COMPLEX`;
  */
 async function triageMessage(userMessage: string): Promise<'haiku' | 'sonnet'> {
   try {
-    const response = await client.messages.create({
+    const response = await getClient().messages.create({
       model: HAIKU_MODEL,
       max_tokens: 10,
       system: TRIAGE_PROMPT,
@@ -124,7 +132,7 @@ export async function chat(
 
   // Loop to handle tool calls
   while (true) {
-    const response = await client.messages.create({
+    const response = await getClient().messages.create({
       model,
       max_tokens: MAX_TOKENS,
       system: context.systemPrompt,
@@ -278,7 +286,7 @@ export async function simpleChat(
   userMessage: string,
   systemPrompt: string
 ): Promise<string> {
-  const response = await client.messages.create({
+  const response = await getClient().messages.create({
     model: HAIKU_MODEL,
     max_tokens: MAX_TOKENS,
     system: systemPrompt,
@@ -316,7 +324,7 @@ export async function chatWithThinking(
   // Non-streaming for simpler thinking block handling
   // Tool loop - extended thinking only for Sonnet
   while (true) {
-    const response = await client.messages.create({
+    const response = await getClient().messages.create({
       model,
       max_tokens: MAX_TOKENS,
       system: context.systemPrompt,
