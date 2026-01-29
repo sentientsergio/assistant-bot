@@ -15,7 +15,14 @@ import {
   hasRecentActivity,
   getMinutesSinceLastActivity,
 } from '../conversation.js';
-import { storeExchange, getRelevantMemories, isInitialized as isMemoryInitialized } from '../memory/index.js';
+import { 
+  storeExchange, 
+  getRelevantMemories, 
+  isInitialized as isMemoryInitialized,
+  getAllFacts,
+  formatFactsForPrompt,
+  isFactsInitialized,
+} from '../memory/index.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 
@@ -136,6 +143,16 @@ export async function startTelegram(config: TelegramConfig): Promise<Bot> {
         if (memories) {
           workspaceContext.systemPrompt += '\n\n' + memories;
           console.log(`[telegram] Added memories to context`);
+        }
+      }
+      
+      // Add extracted facts (stable preferences, info, etc.)
+      if (isFactsInitialized()) {
+        const facts = await getAllFacts();
+        if (facts.length > 0) {
+          const factsContext = formatFactsForPrompt(facts);
+          workspaceContext.systemPrompt += '\n\n' + factsContext;
+          console.log(`[telegram] Added ${facts.length} facts to context`);
         }
       }
       
