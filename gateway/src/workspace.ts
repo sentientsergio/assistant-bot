@@ -8,7 +8,12 @@ import { readFile, readdir } from 'fs/promises';
 import { join, resolve } from 'path';
 import Anthropic from '@anthropic-ai/sdk';
 import type { WorkspaceContext } from './claude.js';
-import { loadAllConversations, formatAllConversationsForSummary } from './conversation.js';
+import { 
+  loadAllConversations, 
+  formatAllConversationsForSummary,
+  loadConversationLog,
+  getRecentMessages,
+} from './conversation.js';
 import { NODE_ENV, ENV_LABEL } from './env.js';
 
 const HAIKU_MODEL = 'claude-haiku-4-5';
@@ -358,11 +363,59 @@ export async function loadHeartbeatContext(workspacePath: string): Promise<strin
     }
   }
 
+  // Load long-term memory (essential for heartbeats - contains learned patterns
+  // like "morning greetings should be relationship-first, not metrics-first")
+  const memoryContent = await tryReadFile(join(absolutePath, 'MEMORY.md'));
+  if (memoryContent) {
+    files.push({ name: 'MEMORY.md', content: memoryContent });
+  }
+
+  // Load tools config (calendar awareness - heartbeats should know about 
+  // upcoming meetings when deciding what to say)
+  const toolsContent = await tryReadFile(join(absolutePath, 'TOOLS.md'));
+  if (toolsContent) {
+    files.push({ name: 'TOOLS.md', content: toolsContent });
+  }
+
   // Load today's memory
   const today = getToday();
   const todayContent = await tryReadFile(join(absolutePath, 'memory', `${today}.md`));
   if (todayContent) {
     files.push({ name: `memory/${today}.md`, content: todayContent });
+  }
+  
+  // Load yesterday's memory (important for continuity - last night's conversation
+  // should inform this morning's heartbeat)
+  const yesterday = getYesterday();
+  const yesterdayContent = await tryReadFile(join(absolutePath, 'memory', `${yesterday}.md`));
+  if (yesterdayContent) {
+    files.push({ name: `memory/${yesterday}.md`, content: yesterdayContent });
+  }
+
+  // Load recent conversation history (so heartbeat knows what was just discussed)
+  let conversationContext = '';
+  try {
+    const log = await loadConversationLog(absolutePath);
+    const recentMessages = getRecentMessages(log, { limit: 10, withinHours: 24 });
+    
+    if (recentMessages.length > 0) {
+      const lines: string[] = ['## Recent Conversation\n'];
+      for (const msg of recentMessages) {
+        const time = new Date(msg.timestamp).toLocaleString('en-US', {
+          weekday: 'short',
+          hour: '2-digit',
+          minute: '2-digit',
+        });
+        const role = msg.role === 'user' ? 'Sergio' : 'You';
+        const content = msg.content.length > 300 
+          ? msg.content.slice(0, 300) + '...' 
+          : msg.content;
+        lines.push(`**${role}** (${time}): ${content}\n`);
+      }
+      conversationContext = lines.join('\n');
+    }
+  } catch {
+    // No conversation history available
   }
 
   // Build heartbeat-specific prompt
@@ -392,6 +445,11 @@ Current time: ${new Date().toLocaleTimeString('en-US', {
 ${file.content}
 \`\`\`
 `);
+  }
+
+  // Add recent conversation history if available
+  if (conversationContext) {
+    sections.push(conversationContext);
   }
 
   sections.push(`---

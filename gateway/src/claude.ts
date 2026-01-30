@@ -146,7 +146,9 @@ export async function chat(
     });
 
     let currentText = '';
-    let toolUse: { id: string; name: string; input: string } | null = null;
+    // Track multiple tool calls
+    const toolUses: Array<{ id: string; name: string; input: string }> = [];
+    let currentToolUse: { id: string; name: string; input: string } | null = null;
     let inputJson = '';
 
     for await (const event of response) {
@@ -154,7 +156,12 @@ export async function chat(
         if (event.content_block.type === 'text') {
           // Starting a text block
         } else if (event.content_block.type === 'tool_use') {
-          toolUse = {
+          // Save previous tool_use if any
+          if (currentToolUse) {
+            currentToolUse.input = inputJson;
+            toolUses.push(currentToolUse);
+          }
+          currentToolUse = {
             id: event.content_block.id,
             name: event.content_block.name,
             input: '',
@@ -166,18 +173,23 @@ export async function chat(
           currentText += event.delta.text;
           // Don't stream intermediate narration to callback during tool loops
           // Only stream if this might be the final response
-          if (!toolUse) {
+          if (toolUses.length === 0 && !currentToolUse) {
             onDelta(event.delta.text);
           }
         } else if (event.delta.type === 'input_json_delta') {
           inputJson += event.delta.partial_json;
         }
       } else if (event.type === 'content_block_stop') {
-        if (toolUse) {
-          toolUse.input = inputJson;
+        // Finalize current tool_use input when block stops
+        if (currentToolUse && inputJson) {
+          currentToolUse.input = inputJson;
         }
       } else if (event.type === 'message_stop') {
-        // Message complete
+        // Message complete - save last tool_use if any
+        if (currentToolUse) {
+          toolUses.push(currentToolUse);
+          currentToolUse = null;
+        }
       }
     }
 
@@ -186,105 +198,123 @@ export async function chat(
       lastNonEmptyText = currentText;
     }
 
-    // If no tool was called, we're done - return ONLY this turn's text
-    if (!toolUse) {
+    // If no tools were called, we're done - return ONLY this turn's text
+    if (toolUses.length === 0) {
       // If this turn had text, return it; otherwise use fallback
       const finalText = currentText.trim() ? currentText : lastNonEmptyText;
       return finalText;
     }
 
-    // Execute the tool
-    let toolInput: ToolInput;
-    try {
-      toolInput = JSON.parse(toolUse.input || '{}') as ToolInput;
-    } catch (parseErr) {
-      // Tool JSON was incomplete/malformed - likely context limit hit
-      // Return what we have so far instead of crashing
-      console.error('Failed to parse tool input JSON, returning partial response:', toolUse.input);
-      if (lastNonEmptyText.trim()) {
-        return lastNonEmptyText;
+    // Execute ALL tools and collect results
+    const toolResults: Array<{ tool_use_id: string; content: string }> = [];
+    const assistantToolBlocks: Array<{ type: 'tool_use'; id: string; name: string; input: unknown }> = [];
+    
+    for (const toolUse of toolUses) {
+      let toolInput: ToolInput;
+      try {
+        toolInput = JSON.parse(toolUse.input || '{}') as ToolInput;
+      } catch (parseErr) {
+        // Tool JSON was incomplete/malformed - likely context limit hit
+        console.error('Failed to parse tool input JSON:', toolUse.input);
+        toolResults.push({
+          tool_use_id: toolUse.id,
+          content: 'Error: Failed to parse tool input',
+        });
+        assistantToolBlocks.push({
+          type: 'tool_use' as const,
+          id: toolUse.id,
+          name: toolUse.name,
+          input: {},
+        });
+        continue;
       }
-      return "I tried to do something but hit a limit. Could you try a shorter message or ask again?";
-    }
-    let toolResult: string;
-
-    try {
-      switch (toolUse.name) {
-        case 'file_read':
-          toolResult = await fileRead(workspacePath, toolInput.path || '');
-          break;
-        case 'file_write':
-          toolResult = await fileWrite(
-            workspacePath,
-            toolInput.path || '',
-            toolInput.content || ''
-          );
-          break;
-        case 'file_list':
-          toolResult = await fileList(workspacePath, toolInput.directory || '.');
-          break;
-        case 'schedule_heartbeat':
-          toolResult = await scheduleHeartbeat(
-            toolInput.purpose || '',
-            toolInput.scheduled_for,
-            toolInput.recurring_schedule
-          );
-          break;
-        case 'list_scheduled_heartbeats':
-          toolResult = await listHeartbeats();
-          break;
-        case 'cancel_scheduled_heartbeat':
-          toolResult = await cancelHeartbeat(toolInput.id || '');
-          break;
-        case 'web_fetch':
-          toolResult = await webFetch(toolInput.url || '');
-          break;
-        case 'calendar_list_events':
-          toolResult = await listEvents(toolInput.max_results || 10);
-          break;
-        case 'calendar_create_event':
-          toolResult = await createEvent(
-            toolInput.summary || '',
-            toolInput.start_time || '',
-            toolInput.end_time || '',
-            toolInput.description,
-            toolInput.location
-          );
-          break;
-        default:
-          toolResult = `Unknown tool: ${toolUse.name}`;
+      
+      let toolResult: string;
+      try {
+        switch (toolUse.name) {
+          case 'file_read':
+            toolResult = await fileRead(workspacePath, toolInput.path || '');
+            break;
+          case 'file_write':
+            toolResult = await fileWrite(
+              workspacePath,
+              toolInput.path || '',
+              toolInput.content || ''
+            );
+            break;
+          case 'file_list':
+            toolResult = await fileList(workspacePath, toolInput.directory || '.');
+            break;
+          case 'schedule_heartbeat':
+            toolResult = await scheduleHeartbeat(
+              toolInput.purpose || '',
+              toolInput.scheduled_for,
+              toolInput.recurring_schedule
+            );
+            break;
+          case 'list_scheduled_heartbeats':
+            toolResult = await listHeartbeats();
+            break;
+          case 'cancel_scheduled_heartbeat':
+            toolResult = await cancelHeartbeat(toolInput.id || '');
+            break;
+          case 'web_fetch':
+            toolResult = await webFetch(toolInput.url || '');
+            break;
+          case 'calendar_list_events':
+            toolResult = await listEvents(toolInput.max_results || 10);
+            break;
+          case 'calendar_create_event':
+            toolResult = await createEvent(
+              toolInput.summary || '',
+              toolInput.start_time || '',
+              toolInput.end_time || '',
+              toolInput.description,
+              toolInput.location
+            );
+            break;
+          default:
+            toolResult = `Unknown tool: ${toolUse.name}`;
+        }
+      } catch (err) {
+        toolResult = `Error: ${err instanceof Error ? err.message : 'Unknown error'}`;
       }
-    } catch (err) {
-      toolResult = `Error: ${err instanceof Error ? err.message : 'Unknown error'}`;
+      
+      toolResults.push({
+        tool_use_id: toolUse.id,
+        content: toolResult,
+      });
+      
+      assistantToolBlocks.push({
+        type: 'tool_use' as const,
+        id: toolUse.id,
+        name: toolUse.name,
+        input: JSON.parse(toolUse.input || '{}'),
+      });
+      
+      console.log(`[chat] Tool ${toolUse.name} executed`);
     }
 
-    // Add assistant's response with tool use to messages
+    // Add assistant's response with ALL tool uses to messages
     messages.push({
       role: 'assistant',
       content: [
         ...(currentText ? [{ type: 'text' as const, text: currentText }] : []),
-        {
-          type: 'tool_use' as const,
-          id: toolUse.id,
-          name: toolUse.name,
-          input: JSON.parse(toolUse.input),
-        },
+        ...assistantToolBlocks,
       ],
     });
 
-    // Add tool result
+    // Add ALL tool results
     messages.push({
       role: 'user',
-      content: [
-        {
-          type: 'tool_result' as const,
-          tool_use_id: toolUse.id,
-          content: toolResult,
-        },
-      ],
+      content: toolResults.map(result => ({
+        type: 'tool_result' as const,
+        tool_use_id: result.tool_use_id,
+        content: result.content,
+      })),
     });
 
-    // Continue the loop to let Claude respond to the tool result
+    // Continue the loop to let Claude respond to the tool results
   }
 }
 
@@ -355,7 +385,7 @@ export async function chatWithThinking(
     // Process content blocks
     // Note: thinking blocks are captured but NOT added to message history
     // (they're internal to the current response, not valid for subsequent turns)
-    let toolUse: { id: string; name: string; input: unknown } | null = null;
+    const toolUses: Array<{ id: string; name: string; input: unknown }> = [];
     const assistantContent: Anthropic.ContentBlock[] = [];
     let turnText = ''; // Text from THIS turn only
 
@@ -367,17 +397,17 @@ export async function chatWithThinking(
         turnText += block.text;
         assistantContent.push(block);
       } else if (block.type === 'tool_use') {
-        toolUse = {
+        toolUses.push({
           id: block.id,
           name: block.name,
           input: block.input,
-        };
+        });
         assistantContent.push(block);
       }
     }
 
-    // If no tool call, we're done - return this turn's text as final response
-    if (!toolUse) {
+    // If no tool calls, we're done - return this turn's text as final response
+    if (toolUses.length === 0) {
       if (thinkingContent) {
         console.log(`[chat] Thinking: ${thinkingContent.slice(0, 100)}...`);
       }
@@ -392,75 +422,85 @@ export async function chatWithThinking(
       console.log(`[chat] Intermediate text (saved as fallback): ${turnText.slice(0, 50)}...`);
     }
 
-    // Execute tool
-    const toolInput = toolUse.input as ToolInput;
-    let toolResult: string;
+    // Execute ALL tool calls and collect results
+    const toolResults: Array<{ tool_use_id: string; content: string }> = [];
+    
+    for (const toolUse of toolUses) {
+      const toolInput = toolUse.input as ToolInput;
+      let toolResult: string;
 
-    try {
-      switch (toolUse.name) {
-        case 'file_read':
-          toolResult = await fileRead(workspacePath, toolInput.path || '');
-          break;
-        case 'file_write':
-          toolResult = await fileWrite(
-            workspacePath,
-            toolInput.path || '',
-            toolInput.content || ''
-          );
-          break;
-        case 'file_list':
-          toolResult = await fileList(workspacePath, toolInput.directory || '.');
-          break;
-        case 'schedule_heartbeat':
-          toolResult = await scheduleHeartbeat(
-            toolInput.purpose || '',
-            toolInput.scheduled_for,
-            toolInput.recurring_schedule
-          );
-          break;
-        case 'list_scheduled_heartbeats':
-          toolResult = await listHeartbeats();
-          break;
-        case 'cancel_scheduled_heartbeat':
-          toolResult = await cancelHeartbeat(toolInput.id || '');
-          break;
-        case 'web_fetch':
-          toolResult = await webFetch(toolInput.url || '');
-          break;
-        case 'calendar_list_events':
-          toolResult = await listEvents(toolInput.max_results || 10);
-          break;
-        case 'calendar_create_event':
-          toolResult = await createEvent(
-            toolInput.summary || '',
-            toolInput.start_time || '',
-            toolInput.end_time || '',
-            toolInput.description,
-            toolInput.location
-          );
-          break;
-        default:
-          toolResult = `Unknown tool: ${toolUse.name}`;
+      try {
+        switch (toolUse.name) {
+          case 'file_read':
+            toolResult = await fileRead(workspacePath, toolInput.path || '');
+            break;
+          case 'file_write':
+            toolResult = await fileWrite(
+              workspacePath,
+              toolInput.path || '',
+              toolInput.content || ''
+            );
+            break;
+          case 'file_list':
+            toolResult = await fileList(workspacePath, toolInput.directory || '.');
+            break;
+          case 'schedule_heartbeat':
+            toolResult = await scheduleHeartbeat(
+              toolInput.purpose || '',
+              toolInput.scheduled_for,
+              toolInput.recurring_schedule
+            );
+            break;
+          case 'list_scheduled_heartbeats':
+            toolResult = await listHeartbeats();
+            break;
+          case 'cancel_scheduled_heartbeat':
+            toolResult = await cancelHeartbeat(toolInput.id || '');
+            break;
+          case 'web_fetch':
+            toolResult = await webFetch(toolInput.url || '');
+            break;
+          case 'calendar_list_events':
+            toolResult = await listEvents(toolInput.max_results || 10);
+            break;
+          case 'calendar_create_event':
+            toolResult = await createEvent(
+              toolInput.summary || '',
+              toolInput.start_time || '',
+              toolInput.end_time || '',
+              toolInput.description,
+              toolInput.location
+            );
+            break;
+          default:
+            toolResult = `Unknown tool: ${toolUse.name}`;
+        }
+      } catch (err) {
+        toolResult = `Error: ${err instanceof Error ? err.message : 'Unknown error'}`;
       }
-    } catch (err) {
-      toolResult = `Error: ${err instanceof Error ? err.message : 'Unknown error'}`;
+      
+      toolResults.push({
+        tool_use_id: toolUse.id,
+        content: toolResult,
+      });
+      
+      console.log(`[chat] Tool ${toolUse.name} executed`);
     }
 
-    // Add assistant response and tool result to messages
+    // Add assistant response with all tool_use blocks
     messages.push({
       role: 'assistant',
       content: assistantContent,
     });
 
+    // Add ALL tool results in a single user message
     messages.push({
       role: 'user',
-      content: [
-        {
-          type: 'tool_result' as const,
-          tool_use_id: toolUse.id,
-          content: toolResult,
-        },
-      ],
+      content: toolResults.map(result => ({
+        type: 'tool_result' as const,
+        tool_use_id: result.tool_use_id,
+        content: result.content,
+      })),
     });
   }
 }

@@ -9,6 +9,12 @@
     "start": "NODE_ENV=production node dist/index.js",
     "start:dev": "NODE_ENV=development node dist/index.js",
     "start:prod": "NODE_ENV=production node dist/index.js",
+    "restart:dev": "launchctl unload ~/Library/LaunchAgents/bot.assistant.gateway.dev.plist 2>/dev/null; launchctl load ~/Library/LaunchAgents/bot.assistant.gateway.dev.plist",
+    "restart:prod": "launchctl unload ~/Library/LaunchAgents/bot.assistant.gateway.prod.plist 2>/dev/null; launchctl load ~/Library/LaunchAgents/bot.assistant.gateway.prod.plist",
+    "stop:dev": "launchctl unload ~/Library/LaunchAgents/bot.assistant.gateway.dev.plist 2>/dev/null || true",
+    "stop:prod": "launchctl unload ~/Library/LaunchAgents/bot.assistant.gateway.prod.plist 2>/dev/null || true",
+    "logs:dev": "tail -f ~/Library/Logs/assistant-bot/gateway.dev.log",
+    "logs:prod": "tail -f ~/Library/Logs/assistant-bot/gateway.prod.log",
     "dev:clone": "bash scripts/dev-clone.sh",
     "dev:wipe": "bash scripts/dev-wipe.sh",
     "test:memory": "npx tsx scripts/test-memory.ts"
