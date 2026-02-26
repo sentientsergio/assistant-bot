@@ -104,6 +104,10 @@ Read `docs/architecture.md` to understand:
 
 You can help build and extend this architecture. When the user wants to add features, you understand the patterns and can implement them.
 
+### Local Development Ports
+
+**Port registry:** Gateway=18789, Webhook=18790. Port assignments are maintained in the shared registry at ~/sentientsergio/port-registry.json. Before claiming any new port, read that file to avoid collisions with other local projects. When adding a new service, register it there first.
+
 ### Evolving Your Identity
 
 Your identity files are yours to update:

@@ -3,18 +3,28 @@
  * 
  * Handles memory retrieval with time-weighted scoring.
  * Combines semantic similarity with recency.
+ * 
+ * CALIBRATION NOTES (2026-02-03):
+ * We now use actual cosine similarity (0-1 scale) from embeddings.
+ * Tested values:
+ *   - Near-exact text match: ~80%
+ *   - Good semantic match: ~50%
+ *   - Weak/irrelevant: ~15%
+ * 
+ * Threshold of 0.35 filters out irrelevant content while keeping
+ * chunks with meaningful semantic overlap.
  */
 
 import { searchChunks, touchChunks, ScoredChunk } from './store.js';
 
-// Retrieval parameters
+// Retrieval parameters - calibrated for cosine similarity (0-1 scale)
 const DEFAULT_TOP_K = 5;
 const MIN_TOP_K = 2;              // Always return at least this many if available
 const MAX_TOP_K = 10;             // Never return more than this
-const SIMILARITY_THRESHOLD = 0.3; // Minimum similarity to include
-const SCORE_GAP_THRESHOLD = 0.15; // If score drops by this much, consider cutting off
-const RECENCY_WEIGHT = 0.3;       // 30% recency, 70% semantic
-const DECAY_RATE = 0.01;          // ~1 week half-life
+const SIMILARITY_THRESHOLD = 0.35; // Minimum cosine similarity to include (35%)
+const SCORE_GAP_THRESHOLD = 0.10; // If score drops by this much, consider cutting off
+const RECENCY_WEIGHT = 0.2;       // 20% recency, 80% semantic (prioritize relevance over freshness)
+const DECAY_RATE = 0.005;         // Slower decay (~6 days half-life)
 
 export interface RetrievedMemory {
   content: string;

@@ -3,6 +3,8 @@
  * 
  * Triggers periodic checks where the assistant decides if it should reach out.
  * Uses Telegram if available, falls back to macOS notifications.
+ * 
+ * Now with awareness context: Claire knows her recent activity before speaking.
  */
 
 import cron from 'node-cron';
@@ -18,11 +20,17 @@ import {
   getMinutesSinceLastActivity,
   hasContactTodayAnyChannel,
 } from './conversation.js';
+import {
+  buildAwarenessContext,
+  formatAwareness,
+  shouldFireHeartbeat as checkShouldFire,
+  getUnansweredTopics,
+} from './awareness.js';
 
 const execAsync = promisify(exec);
 
-// Default schedule: every hour from 8am to 10pm
-const DEFAULT_SCHEDULE = '0 8-22 * * *';
+// Default schedule: every 2 hours from 8am to 10pm
+const DEFAULT_SCHEDULE = '0 8-22/2 * * *';
 
 // Notification settings
 const NOTIFICATION_TITLE = 'Assistant';
@@ -166,6 +174,34 @@ Focus (weave in naturally or defer): ${prompt}`;
 }
 
 /**
+ * Strip internal reasoning from heartbeat response.
+ * Removes content before "---" separator and meta-commentary.
+ */
+function stripInternalReasoning(response: string): string {
+  let cleaned = response;
+  
+  // If there's a "---" separator, take only what's after it
+  const separatorIndex = cleaned.lastIndexOf('---');
+  if (separatorIndex !== -1) {
+    cleaned = cleaned.slice(separatorIndex + 3).trim();
+  }
+  
+  // Remove common internal reasoning patterns
+  const patterns = [
+    /^(Looking at|I need to|Let me|Checking|The context|Based on|Given that|Considering).*?\n+/gi,
+    /^(I'll|I should|I want to|The right move|What I'm noticing).*?\n+/gi,
+    /^\*\*.*?\*\*:.*?\n+/gi, // **Header**: content
+    /^- \*\*.*?\*\*.*?\n+/gi, // - **Item**: content (bullet points of analysis)
+  ];
+  
+  for (const pattern of patterns) {
+    cleaned = cleaned.replace(pattern, '');
+  }
+  
+  return cleaned.trim();
+}
+
+/**
  * Perform a heartbeat check
  */
 async function performHeartbeat(
@@ -181,7 +217,19 @@ async function performHeartbeat(
   }
 
   try {
-    // Load conversation history
+    // Build awareness context FIRST
+    const awareness = await buildAwarenessContext(workspacePath);
+    
+    // Pre-check: should we even fire this heartbeat?
+    if (!forceType) {
+      const { shouldFire, reason } = checkShouldFire(awareness);
+      if (!shouldFire) {
+        console.log(`  Suppressed: ${reason}`);
+        return;
+      }
+    }
+    
+    // Load conversation history (for legacy checks)
     const history = await loadConversation(workspacePath, 'telegram');
     
     // Check for recent conversation (skip for maintenance)
@@ -203,12 +251,25 @@ async function performHeartbeat(
       console.log('  First morning contact (any channel) - leading with warmth');
     }
     
+    // Check for topics to avoid (already asked, no response)
+    const unansweredTopics = getUnansweredTopics(awareness);
+    if (unansweredTopics.length > 0) {
+      console.log(`  Unanswered topics to avoid: ${unansweredTopics.join(', ')}`);
+    }
+    
     // Select heartbeat type
     const heartbeatType = forceType || selectHeartbeatType();
     console.log(`  Heartbeat type: ${heartbeatType.type}`);
     
-    // Prepare the prompt (wrap with morning greeting if first contact)
-    const basePrompt = heartbeatType.prompt;
+    // Prepare the prompt with awareness context
+    const awarenessPrompt = formatAwareness(awareness);
+    let basePrompt = heartbeatType.prompt;
+    
+    // Add topic avoidance guidance if relevant
+    if (unansweredTopics.length > 0 && !forceType) {
+      basePrompt += `\n\nNote: You have already asked about ${unansweredTopics.join(', ')} without response. Choose a different angle or simply be present.`;
+    }
+    
     const finalPrompt = (isFirstMorningContact && !forceType) 
       ? wrapWithMorningGreeting(basePrompt)
       : basePrompt;
@@ -218,32 +279,40 @@ async function performHeartbeat(
     if (heartbeatType.useTools) {
       // Use full chat with tool access
       const workspaceContext = await loadWorkspaceContext(workspacePath, 'heartbeat');
-      let fullResponse = '';
+      // Prepend awareness to system prompt
+      workspaceContext.systemPrompt = awarenessPrompt + '\n\n' + workspaceContext.systemPrompt;
       
       response = await chat(
         finalPrompt,
         workspaceContext,
         workspacePath,
-        (delta) => { fullResponse += delta; }
+        () => {} // Don't need streaming for heartbeats
       );
     } else {
       // Use lightweight heartbeat context (no tools needed)
       const systemPrompt = await loadHeartbeatContext(workspacePath);
-      const workspaceContext = { systemPrompt, workspacePath };
-      let fullResponse = '';
+      // Prepend awareness to system prompt
+      const fullSystemPrompt = awarenessPrompt + '\n\n' + systemPrompt;
+      const workspaceContext = { systemPrompt: fullSystemPrompt, workspacePath };
       
       response = await chat(
         finalPrompt,
         workspaceContext,
         workspacePath,
-        (delta) => { fullResponse += delta; }
+        () => {} // Don't need streaming for heartbeats
       );
     }
 
-    const trimmedResponse = response.trim();
+    // Strip internal reasoning (thinking leak fix)
+    let cleanedResponse = stripInternalReasoning(response);
+    
+    // If stripping left us with nothing useful, use original (truncated)
+    if (cleanedResponse.length < 5) {
+      cleanedResponse = response.trim();
+    }
 
     // Check if Claude decided not to send a notification
-    if (trimmedResponse === 'NO_NOTIFICATION' || trimmedResponse.includes('NO_NOTIFICATION')) {
+    if (cleanedResponse === 'NO_NOTIFICATION' || cleanedResponse.includes('NO_NOTIFICATION')) {
       console.log('  Decision: no notification');
       return;
     }
@@ -255,20 +324,20 @@ async function performHeartbeat(
     }
 
     // Send via Telegram if available, otherwise Mac notification
-    console.log(`  Sending: ${trimmedResponse.substring(0, 50)}...`);
+    console.log(`  Sending: ${cleanedResponse.substring(0, 50)}...`);
     
     if (isTelegramRunning()) {
-      const sent = await sendToOwner(trimmedResponse);
+      const sent = await sendToOwner(cleanedResponse);
       if (sent) {
         console.log('  Delivered via Telegram');
         // Record heartbeat in conversation history so it has context
-        await addMessage(workspacePath, 'telegram', 'assistant', trimmedResponse);
+        await addMessage(workspacePath, 'telegram', 'assistant', cleanedResponse);
       } else {
         console.log('  Telegram failed, falling back to Mac notification');
-        await sendNotification(trimmedResponse);
+        await sendNotification(cleanedResponse);
       }
     } else {
-      await sendNotification(trimmedResponse);
+      await sendNotification(cleanedResponse);
     }
     
   } catch (err) {

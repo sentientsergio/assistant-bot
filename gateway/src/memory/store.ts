@@ -7,7 +7,7 @@
 
 import * as lancedb from '@lancedb/lancedb';
 import { Index } from '@lancedb/lancedb';
-import { embedText, EMBEDDING_DIMENSIONS } from './embeddings.js';
+import { embedText, cosineSimilarity, EMBEDDING_DIMENSIONS } from './embeddings.js';
 import { join } from 'path';
 
 // Database and table references
@@ -115,42 +115,11 @@ export async function addChunk(
 }
 
 /**
- * Search for similar chunks (vector-only, used as fallback)
- */
-export async function searchChunksVector(
-  query: string,
-  queryVector: number[],
-  limit: number = 5,
-  tier?: 'warm' | 'cold'
-): Promise<ScoredChunk[]> {
-  if (!chunksTable) {
-    throw new Error('Memory store not initialized');
-  }
-  
-  let search = chunksTable.vectorSearch(queryVector).limit(limit * 2);
-  
-  if (tier) {
-    search = search.where(`tier = '${tier}'`);
-  }
-  
-  const results = await search.toArray();
-  
-  return results.slice(0, limit).map((row: Record<string, unknown>) => ({
-    id: row.id as string,
-    content: row.content as string,
-    channel: row.channel as string,
-    tier: row.tier as 'warm' | 'cold',
-    createdAt: row.createdAt as string,
-    lastAccessedAt: row.lastAccessedAt as string,
-    turnCount: row.turnCount as number,
-    vector: row.vector as number[],
-    score: 1 / (1 + (row._distance as number)),
-  }));
-}
-
-/**
- * Search for similar chunks using hybrid search (vector + FTS)
- * Falls back to vector-only if FTS fails
+ * Search for similar chunks using pure vector search with cosine similarity
+ * 
+ * Returns actual cosine similarity scores (0-1 scale) for proper threshold calibration.
+ * We removed hybrid search because its scoring was on a different scale that we
+ * miscalibrated, causing relevant chunks to be filtered out.
  */
 export async function searchChunks(
   query: string,
@@ -164,21 +133,27 @@ export async function searchChunks(
   console.log(`[memory] Searching for: "${query.slice(0, 50)}..."`);
   const queryVector = await embedText(query);
   
-  try {
-    // Try hybrid search: vector + full-text
-    let search = chunksTable
-      .search(queryVector)
-      .fullTextSearch(query)
-      .limit(limit * 2);
+  // Use pure vector search - LanceDB returns results by L2 distance
+  let search = chunksTable.vectorSearch(queryVector).limit(limit * 2);
+  
+  if (tier) {
+    search = search.where(`tier = '${tier}'`);
+  }
+  
+  const results = await search.toArray();
+  
+  // Compute actual cosine similarity for each result
+  // This gives us interpretable 0-1 scores we can threshold properly
+  const scored: ScoredChunk[] = results.slice(0, limit).map((row: Record<string, unknown>) => {
+    // LanceDB returns vectors as Vector objects - convert to plain array
+    const rawVector = row.vector;
+    const resultVector: number[] = Array.isArray(rawVector) 
+      ? rawVector 
+      : Array.from(rawVector as Iterable<number>);
     
-    if (tier) {
-      search = search.where(`tier = '${tier}'`);
-    }
+    const similarity = cosineSimilarity(queryVector, resultVector);
     
-    const results = await search.toArray();
-    
-    // Hybrid search returns _relevance_score (higher is better)
-    const scored: ScoredChunk[] = results.slice(0, limit).map((row: Record<string, unknown>) => ({
+    return {
       id: row.id as string,
       content: row.content as string,
       channel: row.channel as string,
@@ -186,19 +161,16 @@ export async function searchChunks(
       createdAt: row.createdAt as string,
       lastAccessedAt: row.lastAccessedAt as string,
       turnCount: row.turnCount as number,
-      vector: row.vector as number[],
-      score: (row._relevance_score as number) ?? 1 / (1 + (row._distance as number ?? 0)),
-    }));
-    
-    console.log(`[memory] Found ${scored.length} chunks (hybrid search)`);
-    return scored;
-  } catch (err) {
-    // Fall back to vector-only search if hybrid fails
-    console.log(`[memory] Hybrid search failed, falling back to vector-only: ${err}`);
-    const results = await searchChunksVector(query, queryVector, limit, tier);
-    console.log(`[memory] Found ${results.length} chunks (vector-only fallback)`);
-    return results;
-  }
+      vector: resultVector,
+      score: similarity,
+    };
+  });
+  
+  // Sort by cosine similarity (highest first)
+  scored.sort((a, b) => b.score - a.score);
+  
+  console.log(`[memory] Found ${scored.length} chunks (vector search, cosine similarity)`);
+  return scored;
 }
 
 /**

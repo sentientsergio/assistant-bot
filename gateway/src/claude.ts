@@ -33,7 +33,6 @@ function getClient(): Anthropic {
 }
 
 // Model configuration
-const HAIKU_MODEL = 'claude-haiku-4-5';
 const SONNET_MODEL = 'claude-sonnet-4-5';
 const MAX_TOKENS = 4096;
 const THINKING_BUDGET = 2048; // tokens for extended thinking
@@ -44,17 +43,17 @@ export interface ChatResult {
   text: string;
 }
 
-// Triage prompt for routing decisions
-const TRIAGE_PROMPT = `You are a routing assistant. Given a user message, determine if it requires deep reasoning or is straightforward.
+// Triage prompt for thinking decisions
+const TRIAGE_PROMPT = `You are a routing assistant. Given a user message, determine if it requires extended thinking.
 
-COMPLEX (use Sonnet):
+NEEDS THINKING:
 - Multi-step analysis or planning
 - Nuanced judgment calls
 - Complex code review or architecture
 - Philosophical or ethical reasoning
 - Ambiguous situations requiring careful thought
 
-SIMPLE (use Haiku):
+NO THINKING NEEDED:
 - Greetings, status updates, casual chat
 - File operations (read, write, list)
 - Straightforward questions with clear answers
@@ -62,15 +61,15 @@ SIMPLE (use Haiku):
 - Accountability check-ins
 - Following clear instructions
 
-Reply with exactly one word: SIMPLE or COMPLEX`;
+Reply with exactly one word: THINKING or SIMPLE`;
 
 /**
- * Triage a message to determine which model should handle it
+ * Triage a message to determine whether extended thinking should be enabled
  */
-async function triageMessage(userMessage: string): Promise<'haiku' | 'sonnet'> {
+async function triageThinking(userMessage: string): Promise<boolean> {
   try {
     const response = await getClient().messages.create({
-      model: HAIKU_MODEL,
+      model: SONNET_MODEL,
       max_tokens: 10,
       system: TRIAGE_PROMPT,
       messages: [{ role: 'user', content: userMessage }],
@@ -80,11 +79,10 @@ async function triageMessage(userMessage: string): Promise<'haiku' | 'sonnet'> {
       ? response.content[0].text.trim().toUpperCase() 
       : '';
     
-    return text.includes('COMPLEX') ? 'sonnet' : 'haiku';
+    return text.includes('THINKING');
   } catch (err) {
-    // On triage failure, default to haiku (cheaper, usually sufficient)
-    console.error('[triage] Error, defaulting to haiku:', err);
-    return 'haiku';
+    console.error('[triage] Error, defaulting to no thinking:', err);
+    return false;
   }
 }
 
@@ -119,10 +117,7 @@ export async function chat(
   workspacePath: string,
   onDelta: StreamCallback
 ): Promise<string> {
-  // Triage to determine which model to use
-  const modelChoice = await triageMessage(userMessage);
-  const model = modelChoice === 'sonnet' ? SONNET_MODEL : HAIKU_MODEL;
-  console.log(`[chat] Routed to ${modelChoice} (${model})`);
+  console.log(`[chat] Using sonnet (${SONNET_MODEL})`);
 
   const messages: Anthropic.MessageParam[] = [
     { role: 'user', content: userMessage }
@@ -133,7 +128,7 @@ export async function chat(
   // Loop to handle tool calls
   while (true) {
     const response = await getClient().messages.create({
-      model,
+      model: SONNET_MODEL,
       max_tokens: MAX_TOKENS,
       system: context.systemPrompt,
       messages,
@@ -320,14 +315,13 @@ export async function chat(
 
 /**
  * Simple non-streaming chat for heartbeat checks
- * Uses Haiku by default (heartbeats are simple, cost-sensitive)
  */
 export async function simpleChat(
   userMessage: string,
   systemPrompt: string
 ): Promise<string> {
   const response = await getClient().messages.create({
-    model: HAIKU_MODEL,
+    model: SONNET_MODEL,
     max_tokens: MAX_TOKENS,
     system: systemPrompt,
     messages: [{ role: 'user', content: userMessage }],
@@ -347,12 +341,9 @@ export async function chatWithThinking(
   context: WorkspaceContext,
   workspacePath: string
 ): Promise<ChatResult> {
-  // Triage to determine which model to use
-  const modelChoice = await triageMessage(userMessage);
-  const model = modelChoice === 'sonnet' ? SONNET_MODEL : HAIKU_MODEL;
-  const useThinking = modelChoice === 'sonnet';
+  const useThinking = await triageThinking(userMessage);
   
-  console.log(`[chat] Using ${model}${useThinking ? ` with extended thinking (budget: ${THINKING_BUDGET})` : ''}`);
+  console.log(`[chat] Using sonnet (${SONNET_MODEL})${useThinking ? ` with extended thinking (budget: ${THINKING_BUDGET})` : ''}`);
 
   const messages: Anthropic.MessageParam[] = [
     { role: 'user', content: userMessage }
@@ -362,10 +353,9 @@ export async function chatWithThinking(
   let lastNonEmptyText = ''; // Fallback if final turn has no text
 
   // Non-streaming for simpler thinking block handling
-  // Tool loop - extended thinking only for Sonnet
   while (true) {
     const response = await getClient().messages.create({
-      model,
+      model: SONNET_MODEL,
       max_tokens: MAX_TOKENS,
       system: context.systemPrompt,
       messages,

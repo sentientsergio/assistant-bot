@@ -23,6 +23,10 @@ import {
   formatFactsForPrompt,
   isFactsInitialized,
 } from '../memory/index.js';
+import {
+  buildAwarenessContext,
+  formatAwareness,
+} from '../awareness.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 
@@ -124,8 +128,16 @@ export async function startTelegram(config: TelegramConfig): Promise<Bot> {
     await ctx.replyWithChatAction('typing');
 
     try {
+      // Build awareness context FIRST (Claire knows her state)
+      const awareness = await buildAwarenessContext(workspacePath);
+      const awarenessPrompt = formatAwareness(awareness);
+      console.log(`[telegram] Built awareness context (${awareness.conversationState.unansweredCount} unanswered)`);
+      
       // Load workspace context (pass channel for cross-channel awareness)
       const workspaceContext = await loadWorkspaceContext(workspacePath, 'telegram');
+      
+      // PREPEND awareness to system prompt (Claire reads her state first)
+      workspaceContext.systemPrompt = awarenessPrompt + '\n\n' + workspaceContext.systemPrompt;
       
       // Load conversation history and add to context
       const history = await loadConversation(workspacePath, 'telegram');
@@ -230,8 +242,14 @@ export async function startTelegram(config: TelegramConfig): Promise<Bot> {
     await ctx.replyWithChatAction('typing');
     
     try {
+      // Build awareness context
+      const awareness = await buildAwarenessContext(workspacePath);
+      const awarenessPrompt = formatAwareness(awareness);
+      
       // Load workspace context
       const workspaceContext = await loadWorkspaceContext(workspacePath, 'telegram');
+      workspaceContext.systemPrompt = awarenessPrompt + '\n\n' + workspaceContext.systemPrompt;
+      
       const history = await loadConversation(workspacePath, 'telegram');
       const historyPrompt = formatHistoryForPrompt(history);
       
@@ -280,7 +298,13 @@ export async function startTelegram(config: TelegramConfig): Promise<Bot> {
     await ctx.replyWithChatAction('typing');
     
     try {
+      // Build awareness context
+      const awareness = await buildAwarenessContext(workspacePath);
+      const awarenessPrompt = formatAwareness(awareness);
+      
       const workspaceContext = await loadWorkspaceContext(workspacePath, 'telegram');
+      workspaceContext.systemPrompt = awarenessPrompt + '\n\n' + workspaceContext.systemPrompt;
+      
       const history = await loadConversation(workspacePath, 'telegram');
       const historyPrompt = formatHistoryForPrompt(history);
       

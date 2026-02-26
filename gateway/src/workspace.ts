@@ -65,68 +65,56 @@ If there's nothing significant, say "No significant activity in other channels."
   }
 }
 
-/**
- * Status data structure for always-on tracking (habits, etc.)
- */
-interface StatusData {
-  habits: {
-    water_oz: number | null;
-    meds_taken: boolean | null;
-    movement_done: boolean | null;
-    fast_status: string | null;
-  };
-  last_updated: string | null;
-  stale_after_hours: number;
-}
+const STATUS_STALE_HOURS = 2;
 
 /**
- * Load status.json and determine if habits check is needed
+ * Load status.json and include it as raw context.
+ * Schema-agnostic: Claire owns the format, we just surface it.
  */
 async function loadStatusContext(workspacePath: string): Promise<string> {
   const statusPath = join(workspacePath, 'status.json');
   
   try {
     const content = await readFile(statusPath, 'utf-8');
-    const status: StatusData = JSON.parse(content);
+    const status = JSON.parse(content);
     
-    // Check if status is stale
-    const isStale = !status.last_updated || 
-      (Date.now() - new Date(status.last_updated).getTime()) > (status.stale_after_hours * 60 * 60 * 1000);
+    // Detect last_updated regardless of schema shape
+    const lastUpdated: string | null = status.last_updated ?? status.lastUpdated ?? null;
+    const isStale = !lastUpdated ||
+      (Date.now() - new Date(lastUpdated).getTime()) > (STATUS_STALE_HOURS * 60 * 60 * 1000);
     
     if (isStale) {
-      console.log('[workspace] Status is stale - habits check needed');
+      const hoursAgo = lastUpdated
+        ? Math.round((Date.now() - new Date(lastUpdated).getTime()) / 3600000)
+        : null;
+      const staleness = hoursAgo !== null ? `${hoursAgo}h ago` : 'never';
+      console.log(`[workspace] Status is stale (${staleness}) - habits check needed`);
       return `## ⚠️ Habits Status Check Needed
 
-Status hasn't been updated in over ${status.stale_after_hours} hours. Before diving into the main topic, ask for a quick habits update:
+Status was last updated ${staleness}. Before the main topic, ask for a quick update:
 - Water: how many oz so far?
 - Meds: taken today?
 - Movement: any activity?
 - Fast status: in window, fasting, etc.?
 
-Update status.json with the response.
+Then update status.json with the response.
 
 ---
 `;
     }
     
-    // Format current status
-    const h = status.habits;
-    const lastUpdate = status.last_updated 
-      ? new Date(status.last_updated).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
-      : 'unknown';
-    
+    const lastUpdate = new Date(lastUpdated!).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
     console.log(`[workspace] Status current (updated ${lastUpdate})`);
-    return `## Current Habits Status (as of ${lastUpdate})
+    return `## Habits Status (as of ${lastUpdate})
 
-- Water: ${h.water_oz !== null ? h.water_oz + 'oz' : 'unknown'}
-- Meds: ${h.meds_taken !== null ? (h.meds_taken ? 'taken' : 'not taken') : 'unknown'}
-- Movement: ${h.movement_done !== null ? (h.movement_done ? 'done' : 'not yet') : 'unknown'}
-- Fast: ${h.fast_status || 'unknown'}
+\`\`\`json
+${JSON.stringify(status, null, 2)}
+\`\`\`
 
 ---
 `;
-  } catch (err) {
-    console.log('[workspace] No status.json found or error reading it');
+  } catch {
+    console.log('[workspace] No status.json found');
     return '';
   }
 }
@@ -194,7 +182,7 @@ export async function loadWorkspaceContext(
   const statusContext = await loadStatusContext(absolutePath);
 
   // Core identity files (always loaded)
-  const coreFiles = ['SOUL.md', 'IDENTITY.md', 'USER.md', 'TOOLS.md'];
+  const coreFiles = ['SOUL.md', 'IDENTITY.md', 'USER.md', 'TOOLS.md', 'THREADS.md', 'DEV-NOTES.md'];
   
   for (const filename of coreFiles) {
     const content = await tryReadFile(join(absolutePath, filename));
