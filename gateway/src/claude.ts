@@ -152,6 +152,12 @@ function getAllTools() {
   ];
 }
 
+function getReadOnlyTools() {
+  return getToolDefinitions().filter(t =>
+    t.name === 'file_read' || t.name === 'file_list'
+  );
+}
+
 export async function chat(
   userMessage: string,
   context: WorkspaceContext,
@@ -372,19 +378,30 @@ export async function chatWithThinking(
 /**
  * Non-streaming Opus chat with tool access for nightly reflective tasks.
  * No triage, no thinking mode — Opus reasons internally.
+ * Pass readOnly: true to restrict to file_read/file_list only (dry-run mode).
  */
 export async function opusChat(
   userMessage: string,
   context: WorkspaceContext,
-  workspacePath: string
+  workspacePath: string,
+  options: { readOnly?: boolean } = {}
 ): Promise<string> {
-  console.log(`[chat] Using opus (${OPUS_MODEL})`);
+  const mode = options.readOnly ? 'opus/read-only' : 'opus';
+  console.log(`[chat] Using ${mode} (${OPUS_MODEL})`);
 
   const messages: Anthropic.MessageParam[] = [
     { role: 'user', content: userMessage }
   ];
 
   let lastNonEmptyText = '';
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+  let turns = 0;
+  const startTime = Date.now();
+
+  // Opus 4.6 pricing (per million tokens)
+  const OPUS_INPUT_COST_PER_M = 5.0;
+  const OPUS_OUTPUT_COST_PER_M = 25.0;
 
   while (true) {
     const response = await getClient().messages.create({
@@ -392,8 +409,12 @@ export async function opusChat(
       max_tokens: OPUS_MAX_TOKENS,
       system: context.systemPrompt,
       messages,
-      tools: getAllTools(),
+      tools: options.readOnly ? getReadOnlyTools() : getAllTools(),
     });
+
+    turns++;
+    totalInputTokens += response.usage.input_tokens;
+    totalOutputTokens += response.usage.output_tokens;
 
     const toolUses: Array<{ id: string; name: string; input: unknown }> = [];
     const assistantContent: Anthropic.ContentBlock[] = [];
@@ -414,6 +435,15 @@ export async function opusChat(
     }
 
     if (toolUses.length === 0) {
+      const elapsedMs = Date.now() - startTime;
+      const inputCost = (totalInputTokens / 1_000_000) * OPUS_INPUT_COST_PER_M;
+      const outputCost = (totalOutputTokens / 1_000_000) * OPUS_OUTPUT_COST_PER_M;
+      const totalCost = inputCost + outputCost;
+      console.log(
+        `[opus] Complete — ${turns} turn(s), ` +
+        `${totalInputTokens.toLocaleString()} in / ${totalOutputTokens.toLocaleString()} out tokens, ` +
+        `$${totalCost.toFixed(4)} (${(elapsedMs / 1000).toFixed(1)}s)`
+      );
       return turnText.trim() ? turnText : lastNonEmptyText;
     }
 
@@ -427,7 +457,7 @@ export async function opusChat(
         toolResult = `Error: ${err instanceof Error ? err.message : 'Unknown error'}`;
       }
       toolResults.push({ tool_use_id: toolUse.id, content: toolResult });
-      console.log(`[opus] Tool ${toolUse.name} executed`);
+      console.log(`[opus] Tool ${toolUse.name} executed (turn ${turns})`);
     }
 
     messages.push({ role: 'assistant', content: assistantContent });
