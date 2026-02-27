@@ -1,32 +1,27 @@
 /**
- * Telegram Channel
- * 
+ * Telegram Channel — v2
+ *
  * Connects the gateway to Telegram via grammY.
  * Only responds to messages from the configured owner user ID.
+ *
+ * Uses the unified conversation state — one messages array across all channels.
+ * No auto-fetching of memories, facts, or cross-channel summaries.
+ * Claire uses tools (search_memory, update_status) when she needs them.
  */
 
 import { Bot, Context } from 'grammy';
-import { chatWithThinking, ChatResult } from '../claude.js';
-import { loadWorkspaceContext } from '../workspace.js';
-import { 
-  loadConversation, 
-  addMessage, 
-  formatHistoryForPrompt,
-  hasRecentActivity,
-  getMinutesSinceLastActivity,
-} from '../conversation.js';
-import { 
-  storeExchange, 
-  getRelevantMemories, 
-  isInitialized as isMemoryInitialized,
-  getAllFacts,
-  formatFactsForPrompt,
-  isFactsInitialized,
-} from '../memory/index.js';
+import { chat, ChatResult } from '../claude.js';
 import {
-  buildAwarenessContext,
-  formatAwareness,
-} from '../awareness.js';
+  appendUserMessage,
+  rollbackLastUserMessage,
+  enqueueTurn,
+  persistState,
+} from '../conversation-state.js';
+import {
+  storeExchange,
+  isInitialized as isMemoryInitialized,
+} from '../memory/index.js';
+import { addMessage } from '../conversation.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 
@@ -39,9 +34,6 @@ interface TelegramConfig {
   workspacePath: string;
 }
 
-/**
- * Get the show_thinking preference from status.json
- */
 async function getShowThinking(workspacePath: string): Promise<boolean> {
   try {
     const statusPath = path.join(workspacePath, 'status.json');
@@ -53,164 +45,102 @@ async function getShowThinking(workspacePath: string): Promise<boolean> {
   }
 }
 
-/**
- * Set the show_thinking preference in status.json
- */
 async function setShowThinking(workspacePath: string, value: boolean): Promise<void> {
   const statusPath = path.join(workspacePath, 'status.json');
   const content = await fs.readFile(statusPath, 'utf-8');
   const status = JSON.parse(content);
-  
+
   if (!status.preferences) {
     status.preferences = {};
   }
   status.preferences.show_thinking = value;
-  
+
   await fs.writeFile(statusPath, JSON.stringify(status, null, 2));
   console.log(`[telegram] Set show_thinking to ${value}`);
 }
 
-/**
- * Check if a message is a thinking toggle command
- * Returns: 'show', 'hide', or null
- */
 function parseThinkingCommand(message: string): 'show' | 'hide' | null {
   const lower = message.toLowerCase().trim();
-  
-  // Natural language patterns
-  if (lower.match(/\b(show|enable|turn on)\b.*thinking/i)) {
-    return 'show';
-  }
-  if (lower.match(/\b(hide|disable|turn off)\b.*thinking/i)) {
-    return 'hide';
-  }
-  
+  if (lower.match(/\b(show|enable|turn on)\b.*thinking/i)) return 'show';
+  if (lower.match(/\b(hide|disable|turn off)\b.*thinking/i)) return 'hide';
   return null;
 }
 
-/**
- * Start the Telegram bot
- */
 export async function startTelegram(config: TelegramConfig): Promise<Bot> {
   const { token, ownerId, workspacePath } = config;
-  
+
   bot = new Bot(token);
   ownerChatId = ownerId;
 
-  // Middleware: only respond to owner
   bot.use(async (ctx, next) => {
     if (ctx.from?.id !== ownerId) {
       console.log(`[telegram] Ignoring message from non-owner: ${ctx.from?.id}`);
-      return; // Silently ignore
+      return;
     }
     await next();
   });
 
-  // Handle text messages
   bot.on('message:text', async (ctx) => {
     const userMessage = ctx.message.text;
     console.log(`[telegram] Received: "${userMessage.substring(0, 50)}..."`);
 
-    // Check for thinking toggle commands first
     const thinkingCommand = parseThinkingCommand(userMessage);
     if (thinkingCommand) {
       const newValue = thinkingCommand === 'show';
       await setShowThinking(workspacePath, newValue);
       await ctx.reply(
-        newValue 
+        newValue
           ? "🧠 Thinking mode enabled. I'll show you my reasoning process."
           : "🧠 Thinking mode disabled. I'll just show you my responses."
       );
       return;
     }
 
-    // Show typing indicator
     await ctx.replyWithChatAction('typing');
 
     try {
-      // Build awareness context FIRST (Claire knows her state)
-      const awareness = await buildAwarenessContext(workspacePath);
-      const awarenessPrompt = formatAwareness(awareness);
-      console.log(`[telegram] Built awareness context (${awareness.conversationState.unansweredCount} unanswered)`);
-      
-      // Load workspace context (pass channel for cross-channel awareness)
-      const workspaceContext = await loadWorkspaceContext(workspacePath, 'telegram');
-      
-      // PREPEND awareness to system prompt (Claire reads her state first)
-      workspaceContext.systemPrompt = awarenessPrompt + '\n\n' + workspaceContext.systemPrompt;
-      
-      // Load conversation history and add to context
-      const history = await loadConversation(workspacePath, 'telegram');
-      const historyPrompt = formatHistoryForPrompt(history);
-      
-      if (historyPrompt) {
-        workspaceContext.systemPrompt += '\n\n' + historyPrompt;
-        console.log(`[telegram] Loaded ${history.messages.length} messages from conversation history`);
-      }
-      
-      // Retrieve relevant memories from vector store (WARM tier)
-      if (isMemoryInitialized()) {
-        const hotContent = history.messages.map(m => m.content);
-        const memories = await getRelevantMemories(userMessage, hotContent);
-        if (memories) {
-          workspaceContext.systemPrompt += '\n\n' + memories;
-          console.log(`[telegram] Added memories to context`);
+      const result = await enqueueTurn(async () => {
+        appendUserMessage(userMessage);
+        try {
+          return await chat(workspacePath);
+        } catch (err) {
+          rollbackLastUserMessage();
+          throw err;
         }
-      }
-      
-      // Add extracted facts (stable preferences, info, etc.)
-      if (isFactsInitialized()) {
-        const facts = await getAllFacts();
-        if (facts.length > 0) {
-          const factsContext = formatFactsForPrompt(facts);
-          workspaceContext.systemPrompt += '\n\n' + factsContext;
-          console.log(`[telegram] Added ${facts.length} facts to context`);
-        }
-      }
-      
-      // Save user message to history
-      await addMessage(workspacePath, 'telegram', 'user', userMessage);
-      
-      // Get response with extended thinking
-      const result: ChatResult = await chatWithThinking(
-        userMessage, 
-        workspaceContext, 
-        workspacePath
-      );
-      
-      // Check if we should show thinking
+      });
+
       const showThinking = await getShowThinking(workspacePath);
-      
-      // Format response based on preference
       let fullResponse: string;
       if (showThinking && result.thinking) {
         fullResponse = `<thinking>\n${result.thinking}\n</thinking>\n\n${result.text}`;
       } else {
         fullResponse = result.text;
       }
-      
-      // Save assistant response to history (just the text, not thinking)
+
+      // Log to messages.json for heartbeat context and cross-channel reads
+      await addMessage(workspacePath, 'telegram', 'user', userMessage);
       await addMessage(workspacePath, 'telegram', 'assistant', result.text);
-      
-      // Store exchange in memory (for future retrieval)
+
+      // Store in vector memory for deep recall
       if (isMemoryInitialized()) {
         storeExchange(userMessage, result.text, 'telegram').catch(err => {
           console.error('[telegram] Failed to store exchange in memory:', err);
         });
       }
 
-      // Send response (split if too long)
       await sendLongMessage(ctx, fullResponse);
-      
-      console.log(`[telegram] Sent response (${fullResponse.length} chars, thinking: ${showThinking})`);
-      
+      console.log(`[telegram] Sent response (${fullResponse.length} chars)`);
+
     } catch (err) {
       console.error('[telegram] Error:', err);
-      await ctx.reply('Sorry, I encountered an error. Please try again.');
+      const isOverloaded = err instanceof Error && err.message.includes('529');
+      const errMsg = isOverloaded
+        ? "I'm temporarily overwhelmed (Anthropic is overloaded). Give it a moment and try again."
+        : 'Sorry, I encountered an error. Please try again.';
+      await ctx.reply(errMsg);
     }
   });
 
-  // Handle /start command
   bot.command('start', async (ctx) => {
     await ctx.reply(
       "Hey! I'm your assistant. Just send me a message and I'll respond.\n\n" +
@@ -218,12 +148,11 @@ export async function startTelegram(config: TelegramConfig): Promise<Bot> {
     );
   });
 
-  // Handle /status command
   bot.command('status', async (ctx) => {
     const uptime = process.uptime();
     const hours = Math.floor(uptime / 3600);
     const minutes = Math.floor((uptime % 3600) / 60);
-    
+
     await ctx.reply(
       `🟢 Online\n` +
       `⏱ Uptime: ${hours}h ${minutes}m\n` +
@@ -231,119 +160,74 @@ export async function startTelegram(config: TelegramConfig): Promise<Bot> {
     );
   });
 
-  // Handle document attachments
   bot.on('message:document', async (ctx) => {
     const doc = ctx.message.document;
     const caption = ctx.message.caption || '';
-    
+
     console.log(`[telegram] Received document: ${doc.file_name} (${doc.mime_type})`);
-    
-    // Show typing indicator
     await ctx.replyWithChatAction('typing');
-    
+
     try {
-      // Build awareness context
-      const awareness = await buildAwarenessContext(workspacePath);
-      const awarenessPrompt = formatAwareness(awareness);
-      
-      // Load workspace context
-      const workspaceContext = await loadWorkspaceContext(workspacePath, 'telegram');
-      workspaceContext.systemPrompt = awarenessPrompt + '\n\n' + workspaceContext.systemPrompt;
-      
-      const history = await loadConversation(workspacePath, 'telegram');
-      const historyPrompt = formatHistoryForPrompt(history);
-      
-      if (historyPrompt) {
-        workspaceContext.systemPrompt += '\n\n' + historyPrompt;
-      }
-      
-      // Build message describing the attachment
-      const userMessage = caption 
+      const userMessage = caption
         ? `[Attached document: ${doc.file_name} (${doc.mime_type})]\n\n${caption}`
         : `[Attached document: ${doc.file_name} (${doc.mime_type})]\n\n(User shared this document without additional text. Acknowledge receipt and ask if they want to discuss it, or note that you cannot yet read document contents directly.)`;
-      
-      // Save to history
+
+      const result = await enqueueTurn(async () => {
+        appendUserMessage(userMessage);
+        return await chat(workspacePath);
+      });
+
       await addMessage(workspacePath, 'telegram', 'user', userMessage);
-      
-      // Get response
-      const result: ChatResult = await chatWithThinking(
-        userMessage, 
-        workspaceContext, 
-        workspacePath
-      );
-      
-      // Save response and send
       await addMessage(workspacePath, 'telegram', 'assistant', result.text);
-      
+
       const showThinking = await getShowThinking(workspacePath);
-      const fullResponse = showThinking && result.thinking 
+      const fullResponse = showThinking && result.thinking
         ? `<thinking>\n${result.thinking}\n</thinking>\n\n${result.text}`
         : result.text;
-      
+
       await sendLongMessage(ctx, fullResponse);
       console.log(`[telegram] Responded to document (${fullResponse.length} chars)`);
-      
+
     } catch (err) {
       console.error('[telegram] Error handling document:', err);
       await ctx.reply('Sorry, I encountered an error processing that document. Please try again.');
     }
   });
 
-  // Handle photo attachments
   bot.on('message:photo', async (ctx) => {
     const caption = ctx.message.caption || '';
-    
     console.log(`[telegram] Received photo`);
-    
     await ctx.replyWithChatAction('typing');
-    
+
     try {
-      // Build awareness context
-      const awareness = await buildAwarenessContext(workspacePath);
-      const awarenessPrompt = formatAwareness(awareness);
-      
-      const workspaceContext = await loadWorkspaceContext(workspacePath, 'telegram');
-      workspaceContext.systemPrompt = awarenessPrompt + '\n\n' + workspaceContext.systemPrompt;
-      
-      const history = await loadConversation(workspacePath, 'telegram');
-      const historyPrompt = formatHistoryForPrompt(history);
-      
-      if (historyPrompt) {
-        workspaceContext.systemPrompt += '\n\n' + historyPrompt;
-      }
-      
-      const userMessage = caption 
+      const userMessage = caption
         ? `[Attached photo]\n\n${caption}`
         : `[Attached photo]\n\n(User shared a photo without additional text. Acknowledge receipt. Note that you cannot yet see image contents directly.)`;
-      
+
+      const result = await enqueueTurn(async () => {
+        appendUserMessage(userMessage);
+        return await chat(workspacePath);
+      });
+
       await addMessage(workspacePath, 'telegram', 'user', userMessage);
-      
-      const result: ChatResult = await chatWithThinking(
-        userMessage, 
-        workspaceContext, 
-        workspacePath
-      );
-      
       await addMessage(workspacePath, 'telegram', 'assistant', result.text);
-      
+
       const showThinking = await getShowThinking(workspacePath);
-      const fullResponse = showThinking && result.thinking 
+      const fullResponse = showThinking && result.thinking
         ? `<thinking>\n${result.thinking}\n</thinking>\n\n${result.text}`
         : result.text;
-      
+
       await sendLongMessage(ctx, fullResponse);
       console.log(`[telegram] Responded to photo (${fullResponse.length} chars)`);
-      
+
     } catch (err) {
       console.error('[telegram] Error handling photo:', err);
       await ctx.reply('Sorry, I encountered an error processing that photo. Please try again.');
     }
   });
 
-  // Start the bot
   console.log('[telegram] Starting bot...');
-  
-  // Use long polling
+
   bot.start({
     onStart: (botInfo) => {
       console.log(`[telegram] Bot started: @${botInfo.username}`);
@@ -353,28 +237,23 @@ export async function startTelegram(config: TelegramConfig): Promise<Bot> {
   return bot;
 }
 
-/**
- * Send a message that might be longer than Telegram's 4096 char limit
- */
 async function sendLongMessage(ctx: Context, text: string): Promise<void> {
-  const MAX_LENGTH = 4000; // Leave some buffer
-  
+  const MAX_LENGTH = 4000;
+
   if (text.length <= MAX_LENGTH) {
     await ctx.reply(text);
     return;
   }
 
-  // Split on paragraph boundaries if possible
   const chunks: string[] = [];
   let remaining = text;
-  
+
   while (remaining.length > 0) {
     if (remaining.length <= MAX_LENGTH) {
       chunks.push(remaining);
       break;
     }
 
-    // Find a good split point
     let splitAt = remaining.lastIndexOf('\n\n', MAX_LENGTH);
     if (splitAt === -1 || splitAt < MAX_LENGTH / 2) {
       splitAt = remaining.lastIndexOf('\n', MAX_LENGTH);
@@ -395,9 +274,6 @@ async function sendLongMessage(ctx: Context, text: string): Promise<void> {
   }
 }
 
-/**
- * Send a proactive message to the owner (for heartbeats)
- */
 export async function sendToOwner(message: string): Promise<boolean> {
   if (!bot || !ownerChatId) {
     console.error('[telegram] Bot not initialized or owner ID not set');
@@ -414,9 +290,6 @@ export async function sendToOwner(message: string): Promise<boolean> {
   }
 }
 
-/**
- * Stop the Telegram bot
- */
 export function stopTelegram(): void {
   if (bot) {
     bot.stop();
@@ -425,9 +298,6 @@ export function stopTelegram(): void {
   }
 }
 
-/**
- * Check if bot is running
- */
 export function isTelegramRunning(): boolean {
   return bot !== null;
 }

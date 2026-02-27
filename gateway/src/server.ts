@@ -1,7 +1,8 @@
 /**
- * WebSocket Server
- * 
- * Handles client connections and routes requests to appropriate handlers.
+ * WebSocket Server — v2
+ *
+ * Handles CLI client connections. Uses the unified conversation state
+ * and streaming chat for real-time text deltas.
  */
 
 import { WebSocketServer, WebSocket } from 'ws';
@@ -20,10 +21,14 @@ import {
   parseMessage,
   generateId,
 } from './protocol.js';
-import { chat } from './claude.js';
-import { loadWorkspaceContext } from './workspace.js';
+import { chatStreaming } from './claude.js';
+import {
+  appendUserMessage,
+  enqueueTurn,
+} from './conversation-state.js';
+import { addMessage } from './conversation.js';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 
 interface Session {
   id: string;
@@ -43,7 +48,7 @@ export function createServer(port: number, workspacePath: string): WebSocketServ
 
     ws.on('message', async (data) => {
       const message = parseMessage(data.toString());
-      
+
       if (!isRequest(message)) {
         const errorResponse = createErrorResponse(
           'unknown',
@@ -105,7 +110,6 @@ async function handleRequest(
       handleStatus(ws, request.id);
       break;
     default: {
-      // TypeScript narrows to never here, but we handle unknown methods defensively
       const unknownRequest = request as { id: string; method: string };
       const response = createErrorResponse(
         unknownRequest.id,
@@ -119,7 +123,7 @@ async function handleRequest(
 
 function handleConnect(ws: WebSocket, requestId: string): void {
   const sessionId = generateId();
-  
+
   sessions.set(ws, {
     id: sessionId,
     ws,
@@ -131,7 +135,7 @@ function handleConnect(ws: WebSocket, requestId: string): void {
     sessionId,
     serverVersion: VERSION,
   });
-  
+
   ws.send(JSON.stringify(response));
   console.log(`Session created: ${sessionId}`);
 }
@@ -156,7 +160,6 @@ async function handleAgent(
   session.lastActivity = new Date();
   const runId = generateId();
 
-  // Acknowledge the request
   const ackResponse = createResponse<AgentPayload>(requestId, {
     runId,
     status: 'accepted',
@@ -164,25 +167,22 @@ async function handleAgent(
   ws.send(JSON.stringify(ackResponse));
 
   try {
-    // Load workspace context
-    const workspaceContext = await loadWorkspaceContext(workspacePath, 'cli');
-    
-    // Stream response from Claude
-    let fullContent = '';
-    
-    await chat(message, workspaceContext, workspacePath, (delta) => {
-      fullContent += delta;
-      const event = createEvent('agent', {
-        runId,
-        delta,
+    const result = await enqueueTurn(async () => {
+      appendUserMessage(message);
+
+      return await chatStreaming(workspacePath, (delta) => {
+        const event = createEvent('agent', { runId, delta });
+        ws.send(JSON.stringify(event));
       });
-      ws.send(JSON.stringify(event));
     });
 
-    // Send completion event
+    // Log to messages.json for heartbeat and history
+    await addMessage(workspacePath, 'cli', 'user', message);
+    await addMessage(workspacePath, 'cli', 'assistant', result.text);
+
     const doneEvent = createEvent('agent', {
       runId,
-      content: fullContent,
+      content: result.text,
       done: true,
     });
     ws.send(JSON.stringify(doneEvent));
@@ -200,29 +200,28 @@ async function handleAgent(
 
 function handleHealth(ws: WebSocket, requestId: string): void {
   const uptime = Math.floor((Date.now() - startTime) / 1000);
-  
+
   const response = createResponse<HealthPayload>(requestId, {
     status: 'ok',
     uptime,
     version: VERSION,
   });
-  
+
   ws.send(JSON.stringify(response));
 }
 
 function handleStatus(ws: WebSocket, requestId: string): void {
   const session = sessions.get(ws);
-  
+
   const response = createResponse<StatusPayload>(requestId, {
     connected: session?.connected ?? false,
     sessionId: session?.id ?? null,
     lastActivity: session?.lastActivity?.toISOString() ?? null,
   });
-  
+
   ws.send(JSON.stringify(response));
 }
 
-// Export for heartbeat to use
 export function broadcast(event: Event): void {
   const message = JSON.stringify(event);
   sessions.forEach((session) => {

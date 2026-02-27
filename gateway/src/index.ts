@@ -1,15 +1,15 @@
 /**
- * Gateway entry point
- * Starts the WebSocket server, Telegram bot, and heartbeat scheduler
- * 
+ * Gateway entry point — v2
+ *
+ * Starts the WebSocket server, Telegram bot, heartbeat scheduler,
+ * and initializes the unified conversation state.
+ *
  * Environment:
  *   NODE_ENV=development  → loads .env.dev (Claire.dev)
  *   NODE_ENV=production   → loads .env.prod (Claire.prod)
  *   (unset)               → loads .env (legacy, defaults to prod-like)
  */
 
-// IMPORTANT: env.ts must be imported FIRST to load environment variables
-// before any other modules read from process.env
 import { NODE_ENV, ENV_LABEL } from './env.js';
 
 import { createServer } from './server.js';
@@ -18,6 +18,8 @@ import { startTelegram, stopTelegram } from './channels/telegram.js';
 import { initScheduledHeartbeats } from './scheduled-heartbeats.js';
 import { startWebhookServer, registerDefaultHandler } from './webhook.js';
 import { initMemoryStore, initFactsStore } from './memory/index.js';
+import { initConversationState } from './conversation-state.js';
+import { resolve } from 'path';
 
 const PORT = parseInt(process.env.GATEWAY_PORT || '18789', 10);
 const WORKSPACE_PATH = process.env.WORKSPACE_PATH || '../workspace';
@@ -25,27 +27,33 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_OWNER_ID = process.env.TELEGRAM_OWNER_ID;
 
 async function main() {
-  console.log(`Starting assistant-bot gateway [${ENV_LABEL}]...`);
+  console.log(`Starting assistant-bot gateway [${ENV_LABEL}] — v2 architecture`);
   console.log(`  Environment: ${NODE_ENV}`);
   console.log(`  Port: ${PORT}`);
   console.log(`  Workspace: ${WORKSPACE_PATH}`);
 
-  // Initialize memory store (vector chunks)
+  // Initialize unified conversation state (reload from disk)
+  try {
+    await initConversationState(resolve(WORKSPACE_PATH));
+    console.log('  Conversation state: initialized');
+  } catch (err) {
+    console.error('  Conversation state: failed to initialize', err);
+  }
+
+  // Initialize memory store (vector chunks — write pipeline only)
   try {
     await initMemoryStore(WORKSPACE_PATH);
     console.log('  Memory: initialized');
   } catch (err) {
     console.error('  Memory: failed to initialize', err);
-    // Continue without memory - graceful degradation
   }
 
-  // Initialize facts store
+  // Initialize facts store (search_memory reads from this)
   try {
     await initFactsStore(WORKSPACE_PATH);
     console.log('  Facts: initialized');
   } catch (err) {
     console.error('  Facts: failed to initialize', err);
-    // Continue without facts - graceful degradation
   }
 
   // Start WebSocket server
@@ -53,7 +61,7 @@ async function main() {
 
   // Start webhook HTTP server
   startWebhookServer();
-  registerDefaultHandler(); // Enable test webhook → Telegram
+  registerDefaultHandler();
 
   // Start Telegram bot if configured
   if (TELEGRAM_TOKEN && TELEGRAM_OWNER_ID) {

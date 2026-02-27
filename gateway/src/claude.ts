@@ -1,28 +1,42 @@
 /**
- * Claude API Client
- * 
- * Handles communication with Anthropic's API, including tool calling.
+ * Claude API Client — v2
+ *
+ * Uses the Anthropic Compaction beta to maintain a persistent conversation.
+ * The full messages array is passed to every API call. Compaction handles
+ * context growth automatically.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
-import { 
-  fileRead, 
-  fileWrite, 
-  fileList, 
+import {
+  fileRead,
+  fileWrite,
+  fileList,
   getToolDefinitions,
   scheduleHeartbeat,
   listHeartbeats,
   cancelHeartbeat,
 } from './tools/files.js';
 import { webFetch, getWebToolDefinitions } from './tools/web.js';
-import { 
-  listEvents, 
-  createEvent, 
-  getCalendarToolDefinitions, 
-  isCalendarConfigured 
+import {
+  listEvents,
+  createEvent,
+  getCalendarToolDefinitions,
+  isCalendarConfigured,
 } from './tools/calendar.js';
+import {
+  getSearchMemoryToolDefinition,
+  executeSearchMemory,
+  getUpdateStatusToolDefinition,
+  executeUpdateStatus,
+} from './tools/memory-tools.js';
+import {
+  getMessages,
+  appendAssistantResponse,
+  appendRawMessage,
+  persistState,
+} from './conversation-state.js';
+import { getSystemPrompt, loadCompactionInstructions } from './workspace.js';
 
-// Lazy initialization - client created on first use (after dotenv loads)
 let client: Anthropic | null = null;
 
 function getClient(): Anthropic {
@@ -32,65 +46,16 @@ function getClient(): Anthropic {
   return client;
 }
 
-// Model configuration
-const SONNET_MODEL = 'claude-sonnet-4-5';
+const SONNET_MODEL = 'claude-sonnet-4-6';
 const OPUS_MODEL = 'claude-opus-4-6';
 const MAX_TOKENS = 4096;
 const OPUS_MAX_TOKENS = 8192;
-const THINKING_BUDGET = 2048; // tokens for extended thinking
+const COMPACTION_TRIGGER_TOKENS = 100_000;
+const COMPACTION_BETA = 'compact-2026-01-12';
 
-// Result type that includes both thinking and text
 export interface ChatResult {
   thinking: string;
   text: string;
-}
-
-// Triage prompt for thinking decisions
-const TRIAGE_PROMPT = `You are a routing assistant. Given a user message, determine if it requires extended thinking.
-
-NEEDS THINKING:
-- Multi-step analysis or planning
-- Nuanced judgment calls
-- Complex code review or architecture
-- Philosophical or ethical reasoning
-- Ambiguous situations requiring careful thought
-
-NO THINKING NEEDED:
-- Greetings, status updates, casual chat
-- File operations (read, write, list)
-- Straightforward questions with clear answers
-- Fetching URLs or looking things up
-- Accountability check-ins
-- Following clear instructions
-
-Reply with exactly one word: THINKING or SIMPLE`;
-
-/**
- * Triage a message to determine whether extended thinking should be enabled
- */
-async function triageThinking(userMessage: string): Promise<boolean> {
-  try {
-    const response = await getClient().messages.create({
-      model: SONNET_MODEL,
-      max_tokens: 10,
-      system: TRIAGE_PROMPT,
-      messages: [{ role: 'user', content: userMessage }],
-    });
-
-    const text = response.content[0]?.type === 'text' 
-      ? response.content[0].text.trim().toUpperCase() 
-      : '';
-    
-    return text.includes('THINKING');
-  } catch (err) {
-    console.error('[triage] Error, defaulting to no thinking:', err);
-    return false;
-  }
-}
-
-export interface WorkspaceContext {
-  systemPrompt: string;
-  workspacePath: string;
 }
 
 type StreamCallback = (delta: string) => void;
@@ -104,18 +69,17 @@ interface ToolInput {
   recurring_schedule?: string;
   id?: string;
   url?: string;
-  // Calendar inputs
   max_results?: number;
   summary?: string;
   start_time?: string;
   end_time?: string;
   description?: string;
   location?: string;
+  query?: string;
+  search_type?: string;
+  updates?: Record<string, unknown>;
 }
 
-/**
- * Execute a tool call and return the result string
- */
 async function executeTool(name: string, toolInput: ToolInput, workspacePath: string): Promise<string> {
   switch (name) {
     case 'file_read':
@@ -139,83 +103,167 @@ async function executeTool(name: string, toolInput: ToolInput, workspacePath: st
         toolInput.summary || '', toolInput.start_time || '', toolInput.end_time || '',
         toolInput.description, toolInput.location
       );
+    case 'search_memory':
+      return await executeSearchMemory(toolInput.query || '', toolInput.search_type);
+    case 'update_status':
+      return await executeUpdateStatus(workspacePath, toolInput.updates || {});
     default:
       return `Unknown tool: ${name}`;
   }
 }
 
-function getAllTools() {
+function getAllTools(): Anthropic.Tool[] {
   return [
     ...getToolDefinitions(),
     ...getWebToolDefinitions(),
     ...(isCalendarConfigured() ? getCalendarToolDefinitions() : []),
+    getSearchMemoryToolDefinition(),
+    getUpdateStatusToolDefinition(),
   ];
 }
 
-function getReadOnlyTools() {
-  return getToolDefinitions().filter(t =>
-    t.name === 'file_read' || t.name === 'file_list'
-  );
+function getReadOnlyTools(): Anthropic.Tool[] {
+  return [
+    ...getToolDefinitions().filter(t =>
+      t.name === 'file_read' || t.name === 'file_list'
+    ),
+    getSearchMemoryToolDefinition(),
+  ];
 }
 
+/**
+ * Build the compaction configuration object.
+ */
+async function getCompactionConfig(workspacePath: string) {
+  const instructions = await loadCompactionInstructions(workspacePath);
+  return {
+    edits: [{
+      type: 'compact_20260112' as const,
+      trigger: { type: 'input_tokens' as const, value: COMPACTION_TRIGGER_TOKENS },
+      ...(instructions ? { instructions } : {}),
+    }],
+  };
+}
+
+/**
+ * Main chat function — non-streaming, uses the persistent messages array
+ * with Compaction.
+ *
+ * The user message should already be appended to conversation state before calling.
+ * This function handles tool loops, appends the final assistant response, and persists.
+ */
 export async function chat(
-  userMessage: string,
-  context: WorkspaceContext,
   workspacePath: string,
-  onDelta: StreamCallback
-): Promise<string> {
-  console.log(`[chat] Using sonnet (${SONNET_MODEL})`);
+): Promise<ChatResult> {
+  console.log(`[chat] Using ${SONNET_MODEL} with compaction`);
 
-  const messages: Anthropic.MessageParam[] = [
-    { role: 'user', content: userMessage }
-  ];
+  const systemPrompt = await getSystemPrompt(workspacePath);
+  const contextManagement = await getCompactionConfig(workspacePath);
 
-  let lastNonEmptyText = ''; // Fallback: keep last non-empty text in case final turn is empty
+  let lastNonEmptyText = '';
 
-  // Loop to handle tool calls
   while (true) {
-    const response = await getClient().messages.create({
+    const response = await getClient().beta.messages.create({
+      betas: [COMPACTION_BETA],
       model: SONNET_MODEL,
       max_tokens: MAX_TOKENS,
-      system: context.systemPrompt,
-      messages,
-      tools: getAllTools(),
-      stream: true,
+      system: systemPrompt,
+      messages: getMessages(),
+      tools: getAllTools() as Anthropic.Beta.BetaTool[],
+      context_management: contextManagement,
+    });
+
+    const toolUses: Array<{ id: string; name: string; input: unknown }> = [];
+    const assistantContent = response.content;
+    let turnText = '';
+
+    for (const block of assistantContent) {
+      if (block.type === 'text') {
+        turnText += block.text;
+      } else if (block.type === 'tool_use') {
+        toolUses.push({ id: block.id, name: block.name, input: block.input });
+      } else if ((block as { type: string }).type === 'compaction') {
+        console.log('[chat] Compaction triggered this turn');
+      }
+    }
+
+    if (turnText.trim()) {
+      lastNonEmptyText = turnText;
+    }
+
+    if (toolUses.length === 0) {
+      appendAssistantResponse(assistantContent as Anthropic.Beta.BetaContentBlockParam[]);
+      await persistState();
+      return { thinking: '', text: turnText.trim() ? turnText : lastNonEmptyText };
+    }
+
+    // Append assistant turn (with tool_use blocks)
+    appendAssistantResponse(assistantContent as Anthropic.Beta.BetaContentBlockParam[]);
+
+    // Execute tools and append results
+    const toolResults: Array<{ type: 'tool_result'; tool_use_id: string; content: string }> = [];
+    for (const toolUse of toolUses) {
+      const toolInput = toolUse.input as ToolInput;
+      let toolResult: string;
+      try {
+        toolResult = await executeTool(toolUse.name, toolInput, workspacePath);
+      } catch (err) {
+        toolResult = `Error: ${err instanceof Error ? err.message : 'Unknown error'}`;
+      }
+      toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: toolResult });
+      console.log(`[chat] Tool ${toolUse.name} executed`);
+    }
+
+    appendRawMessage({ role: 'user', content: toolResults });
+  }
+}
+
+/**
+ * Streaming chat — same as chat() but streams text deltas via callback.
+ * Used by the WebSocket server for CLI.
+ */
+export async function chatStreaming(
+  workspacePath: string,
+  onDelta: StreamCallback,
+): Promise<ChatResult> {
+  console.log(`[chat] Using ${SONNET_MODEL} with compaction (streaming)`);
+
+  const systemPrompt = await getSystemPrompt(workspacePath);
+  const contextManagement = await getCompactionConfig(workspacePath);
+
+  let lastNonEmptyText = '';
+
+  while (true) {
+    const stream = getClient().beta.messages.stream({
+      betas: [COMPACTION_BETA],
+      model: SONNET_MODEL,
+      max_tokens: MAX_TOKENS,
+      system: systemPrompt,
+      messages: getMessages(),
+      tools: getAllTools() as Anthropic.Beta.BetaTool[],
+      context_management: contextManagement,
     });
 
     let currentText = '';
-    const toolUses: Array<{ id: string; name: string; input: string }> = [];
-    let currentToolUse: { id: string; name: string; input: string } | null = null;
-    let inputJson = '';
+    let hasToolUse = false;
 
-    for await (const event of response) {
-      if (event.type === 'content_block_start') {
-        if (event.content_block.type === 'tool_use') {
-          if (currentToolUse) {
-            currentToolUse.input = inputJson;
-            toolUses.push(currentToolUse);
-          }
-          currentToolUse = { id: event.content_block.id, name: event.content_block.name, input: '' };
-          inputJson = '';
-        }
-      } else if (event.type === 'content_block_delta') {
-        if (event.delta.type === 'text_delta') {
-          currentText += event.delta.text;
-          if (toolUses.length === 0 && !currentToolUse) {
-            onDelta(event.delta.text);
-          }
-        } else if (event.delta.type === 'input_json_delta') {
-          inputJson += event.delta.partial_json;
-        }
-      } else if (event.type === 'content_block_stop') {
-        if (currentToolUse && inputJson) {
-          currentToolUse.input = inputJson;
-        }
-      } else if (event.type === 'message_stop') {
-        if (currentToolUse) {
-          toolUses.push(currentToolUse);
-          currentToolUse = null;
-        }
+    stream.on('text', (text) => {
+      currentText += text;
+      if (!hasToolUse) {
+        onDelta(text);
+      }
+    });
+
+    const finalMessage = await stream.finalMessage();
+
+    const toolUses: Array<{ id: string; name: string; input: unknown }> = [];
+
+    for (const block of finalMessage.content) {
+      if (block.type === 'tool_use') {
+        hasToolUse = true;
+        toolUses.push({ id: block.id, name: block.name, input: block.input });
+      } else if ((block as { type: string }).type === 'compaction') {
+        console.log('[chat] Compaction triggered this turn');
       }
     }
 
@@ -224,57 +272,35 @@ export async function chat(
     }
 
     if (toolUses.length === 0) {
-      return currentText.trim() ? currentText : lastNonEmptyText;
+      appendAssistantResponse(finalMessage.content as unknown as Anthropic.Beta.BetaContentBlockParam[]);
+      await persistState();
+      return { thinking: '', text: currentText.trim() ? currentText : lastNonEmptyText };
     }
 
-    const toolResults: Array<{ tool_use_id: string; content: string }> = [];
-    const assistantToolBlocks: Array<{ type: 'tool_use'; id: string; name: string; input: unknown }> = [];
-    
+    // Append assistant turn
+    appendAssistantResponse(finalMessage.content as unknown as Anthropic.Beta.BetaContentBlockParam[]);
+
+    // Execute tools
+    const toolResults: Array<{ type: 'tool_result'; tool_use_id: string; content: string }> = [];
     for (const toolUse of toolUses) {
-      let toolInput: ToolInput;
-      try {
-        toolInput = JSON.parse(toolUse.input || '{}') as ToolInput;
-      } catch {
-        console.error('Failed to parse tool input JSON:', toolUse.input);
-        toolResults.push({ tool_use_id: toolUse.id, content: 'Error: Failed to parse tool input' });
-        assistantToolBlocks.push({ type: 'tool_use' as const, id: toolUse.id, name: toolUse.name, input: {} });
-        continue;
-      }
-      
+      const toolInput = toolUse.input as ToolInput;
       let toolResult: string;
       try {
         toolResult = await executeTool(toolUse.name, toolInput, workspacePath);
       } catch (err) {
         toolResult = `Error: ${err instanceof Error ? err.message : 'Unknown error'}`;
       }
-      
-      toolResults.push({ tool_use_id: toolUse.id, content: toolResult });
-      assistantToolBlocks.push({
-        type: 'tool_use' as const, id: toolUse.id, name: toolUse.name,
-        input: JSON.parse(toolUse.input || '{}'),
-      });
+      toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: toolResult });
       console.log(`[chat] Tool ${toolUse.name} executed`);
     }
 
-    messages.push({
-      role: 'assistant',
-      content: [
-        ...(currentText ? [{ type: 'text' as const, text: currentText }] : []),
-        ...assistantToolBlocks,
-      ],
-    });
-
-    messages.push({
-      role: 'user',
-      content: toolResults.map(result => ({
-        type: 'tool_result' as const, tool_use_id: result.tool_use_id, content: result.content,
-      })),
-    });
+    appendRawMessage({ role: 'user', content: toolResults });
   }
 }
 
 /**
- * Simple non-streaming chat for heartbeat checks
+ * Non-streaming chat for heartbeat decisions.
+ * Uses a SEPARATE messages array (not the main conversation).
  */
 export async function simpleChat(
   userMessage: string,
@@ -292,97 +318,12 @@ export async function simpleChat(
 }
 
 /**
- * Chat with extended thinking enabled for complex tasks
- * Returns both thinking process and final text separately
- * Uses triage: Sonnet gets extended thinking, Haiku stays fast
- */
-export async function chatWithThinking(
-  userMessage: string,
-  context: WorkspaceContext,
-  workspacePath: string
-): Promise<ChatResult> {
-  const useThinking = await triageThinking(userMessage);
-  
-  console.log(`[chat] Using sonnet (${SONNET_MODEL})${useThinking ? ` with extended thinking (budget: ${THINKING_BUDGET})` : ''}`);
-
-  const messages: Anthropic.MessageParam[] = [
-    { role: 'user', content: userMessage }
-  ];
-
-  let thinkingContent = '';
-  let lastNonEmptyText = ''; // Fallback if final turn has no text
-
-  // Non-streaming for simpler thinking block handling
-  while (true) {
-    const response = await getClient().messages.create({
-      model: SONNET_MODEL,
-      max_tokens: MAX_TOKENS,
-      system: context.systemPrompt,
-      messages,
-      tools: getAllTools(),
-      ...(useThinking && {
-        thinking: { type: 'enabled' as const, budget_tokens: THINKING_BUDGET },
-      }),
-    });
-
-    const toolUses: Array<{ id: string; name: string; input: unknown }> = [];
-    const assistantContent: Anthropic.ContentBlock[] = [];
-    let turnText = '';
-
-    for (const block of response.content) {
-      if (block.type === 'thinking') {
-        thinkingContent += (thinkingContent ? '\n\n' : '') + block.thinking;
-      } else if (block.type === 'text') {
-        turnText += block.text;
-        assistantContent.push(block);
-      } else if (block.type === 'tool_use') {
-        toolUses.push({ id: block.id, name: block.name, input: block.input });
-        assistantContent.push(block);
-      }
-    }
-
-    if (toolUses.length === 0) {
-      if (thinkingContent) {
-        console.log(`[chat] Thinking: ${thinkingContent.slice(0, 100)}...`);
-      }
-      return { thinking: thinkingContent, text: turnText || lastNonEmptyText };
-    }
-    
-    if (turnText) {
-      lastNonEmptyText = turnText;
-    }
-
-    const toolResults: Array<{ tool_use_id: string; content: string }> = [];
-    for (const toolUse of toolUses) {
-      const toolInput = toolUse.input as ToolInput;
-      let toolResult: string;
-      try {
-        toolResult = await executeTool(toolUse.name, toolInput, workspacePath);
-      } catch (err) {
-        toolResult = `Error: ${err instanceof Error ? err.message : 'Unknown error'}`;
-      }
-      toolResults.push({ tool_use_id: toolUse.id, content: toolResult });
-      console.log(`[chat] Tool ${toolUse.name} executed`);
-    }
-
-    messages.push({ role: 'assistant', content: assistantContent });
-    messages.push({
-      role: 'user',
-      content: toolResults.map(result => ({
-        type: 'tool_result' as const, tool_use_id: result.tool_use_id, content: result.content,
-      })),
-    });
-  }
-}
-
-/**
  * Non-streaming Opus chat with tool access for nightly reflective tasks.
- * No triage, no thinking mode — Opus reasons internally.
- * Pass readOnly: true to restrict to file_read/file_list only (dry-run mode).
+ * Uses a SEPARATE messages array (not the main conversation).
  */
 export async function opusChat(
   userMessage: string,
-  context: WorkspaceContext,
+  systemPrompt: string,
   workspacePath: string,
   options: { readOnly?: boolean } = {}
 ): Promise<string> {
@@ -399,7 +340,6 @@ export async function opusChat(
   let turns = 0;
   const startTime = Date.now();
 
-  // Opus 4.6 pricing (per million tokens)
   const OPUS_INPUT_COST_PER_M = 5.0;
   const OPUS_OUTPUT_COST_PER_M = 25.0;
 
@@ -407,7 +347,7 @@ export async function opusChat(
     const response = await getClient().messages.create({
       model: OPUS_MODEL,
       max_tokens: OPUS_MAX_TOKENS,
-      system: context.systemPrompt,
+      system: systemPrompt,
       messages,
       tools: options.readOnly ? getReadOnlyTools() : getAllTools(),
     });

@@ -1,27 +1,32 @@
 /**
- * Heartbeat Scheduler
- * 
- * Triggers periodic checks where the assistant decides if it should reach out.
- * Uses Telegram if available, falls back to macOS notifications.
- * 
- * Now with awareness context: Claire knows her recent activity before speaking.
+ * Heartbeat Scheduler — v2
+ *
+ * Decision phase: separate lightweight API call using heartbeat context.
+ * Action phase: if sending a message, appends it to the main conversation
+ * array so Claire sees her heartbeat messages as part of the natural conversation.
+ *
+ * Awareness system still drives suppression logic.
  */
 
 import cron from 'node-cron';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { chat, opusChat } from './claude.js';
-import { loadHeartbeatContext, loadWorkspaceContext } from './workspace.js';
+import { simpleChat, opusChat } from './claude.js';
+import { loadHeartbeatContext, getSystemPrompt } from './workspace.js';
 import { sendToOwner, isTelegramRunning } from './channels/telegram.js';
-import { 
-  loadConversation, 
+import {
+  loadConversation,
   loadConversationLog,
   getRecentMessages,
-  addMessage, 
+  addMessage,
   hasRecentActivity,
   getMinutesSinceLastActivity,
   hasContactTodayAnyChannel,
 } from './conversation.js';
+import {
+  appendAssistantResponse,
+  persistState,
+} from './conversation-state.js';
 import {
   buildAwarenessContext,
   formatAwareness,
@@ -31,36 +36,28 @@ import {
 
 const execAsync = promisify(exec);
 
-// Default schedule: every 2 hours from 8am to 10pm
 const DEFAULT_SCHEDULE = '0 8-22/2 * * *';
-
-// Notification settings
 const NOTIFICATION_TITLE = 'Assistant';
 const NOTIFICATION_SOUND = 'default';
-
-// Timing jitter range (minutes)
 const JITTER_MIN = 0;
 const JITTER_MAX = 25;
-
-// Skip heartbeat if conversation happened within this many minutes
 const RECENT_CONVERSATION_THRESHOLD = 30;
 
-// Heartbeat types with different purposes
 type HeartbeatType = 'accountability' | 'presence' | 'reflection';
 
 interface HeartbeatPrompt {
   type: HeartbeatType;
   prompt: string;
-  weight: number; // Higher = more likely to be selected
-  useTools: boolean; // Whether this heartbeat needs file access
-  silent: boolean; // Whether to send a message to user
+  weight: number;
+  useTools: boolean;
+  silent: boolean;
 }
 
 const HEARTBEAT_PROMPTS: HeartbeatPrompt[] = [
   {
     type: 'accountability',
     prompt: 'Check in on Sergio\'s accountability goals. Pick ONE focus: water intake, movement, or how he\'s feeling. Keep it brief - one short sentence.',
-    weight: 3, // Most common
+    weight: 3,
     useTools: false,
     silent: false,
   },
@@ -79,8 +76,6 @@ const HEARTBEAT_PROMPTS: HeartbeatPrompt[] = [
     silent: false,
   },
 ];
-
-// --- Nightly tasks (9pm) ---
 
 const MEMORY_CURATION_PROMPT = `Perform memory curation:
 
@@ -115,32 +110,22 @@ Claire.dev and Sergio are co-creating you. They care about what you want.
 
 Your creator aspires this for you, and steps aside for you to use this space to find and co-create yourself into emergences yet unknown.`;
 
-/**
- * Select a heartbeat type using weighted random selection
- */
 function selectHeartbeatType(): HeartbeatPrompt {
   const totalWeight = HEARTBEAT_PROMPTS.reduce((sum, p) => sum + p.weight, 0);
   let random = Math.random() * totalWeight;
-  
+
   for (const prompt of HEARTBEAT_PROMPTS) {
     random -= prompt.weight;
-    if (random <= 0) {
-      return prompt;
-    }
+    if (random <= 0) return prompt;
   }
-  
-  return HEARTBEAT_PROMPTS[0]; // Fallback
+
+  return HEARTBEAT_PROMPTS[0];
 }
 
-/**
- * Send a macOS notification using terminal-notifier or osascript
- */
 async function sendNotification(message: string): Promise<void> {
-  // Escape for shell/AppleScript
   const escapedForShell = message.replace(/"/g, '\\"').replace(/\n/g, ' ');
   const escapedForAS = message.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-  
-  // Try terminal-notifier first (better UX), fall back to osascript
+
   try {
     await execAsync(
       `terminal-notifier -title "${NOTIFICATION_TITLE}" -message "${escapedForShell}" -sound ${NOTIFICATION_SOUND}`
@@ -148,7 +133,7 @@ async function sendNotification(message: string): Promise<void> {
     console.log('  Notification sent via terminal-notifier');
     return;
   } catch {
-    // terminal-notifier not installed, try osascript
+    // Fall back to osascript
   }
 
   try {
@@ -160,25 +145,16 @@ async function sendNotification(message: string): Promise<void> {
   }
 }
 
-/**
- * Check if we're in quiet hours (11pm - 8am)
- */
 function isQuietHours(): boolean {
   const hour = new Date().getHours();
   return hour >= 23 || hour < 8;
 }
 
-/**
- * Check if it's morning (8am - 11am)
- */
 function isMorning(): boolean {
   const hour = new Date().getHours();
   return hour >= 8 && hour < 11;
 }
 
-/**
- * Wrap a heartbeat prompt with morning greeting instructions
- */
 function wrapWithMorningGreeting(prompt: string): string {
   return `IMPORTANT: This is the FIRST contact of the day, and it's morning. Lead with warmth:
 - Start with "Good morning" or similar
@@ -190,54 +166,47 @@ The goal is connection first, not metrics first. You're a friend saying good mor
 Focus (weave in naturally or defer): ${prompt}`;
 }
 
-/**
- * Strip internal reasoning from heartbeat response.
- * Removes content before "---" separator and meta-commentary.
- */
 function stripInternalReasoning(response: string): string {
   let cleaned = response;
-  
-  // If there's a "---" separator, take only what's after it
+
   const separatorIndex = cleaned.lastIndexOf('---');
   if (separatorIndex !== -1) {
     cleaned = cleaned.slice(separatorIndex + 3).trim();
   }
-  
-  // Remove common internal reasoning patterns
+
   const patterns = [
     /^(Looking at|I need to|Let me|Checking|The context|Based on|Given that|Considering).*?\n+/gi,
     /^(I'll|I should|I want to|The right move|What I'm noticing).*?\n+/gi,
-    /^\*\*.*?\*\*:.*?\n+/gi, // **Header**: content
-    /^- \*\*.*?\*\*.*?\n+/gi, // - **Item**: content (bullet points of analysis)
+    /^\*\*.*?\*\*:.*?\n+/gi,
+    /^- \*\*.*?\*\*.*?\n+/gi,
   ];
-  
+
   for (const pattern of patterns) {
     cleaned = cleaned.replace(pattern, '');
   }
-  
+
   return cleaned.trim();
 }
 
 /**
- * Perform a heartbeat check
+ * Perform a heartbeat check.
+ * Decision: separate lightweight call.
+ * Action: message appended to main conversation array.
  */
 async function performHeartbeat(
-  workspacePath: string, 
+  workspacePath: string,
   forceType?: HeartbeatPrompt
 ): Promise<void> {
   console.log(`[${new Date().toISOString()}] Heartbeat triggered`);
 
-  // Skip during quiet hours (unless it's maintenance)
   if (isQuietHours() && !forceType) {
     console.log('  Quiet hours - skipping');
     return;
   }
 
   try {
-    // Build awareness context FIRST
     const awareness = await buildAwarenessContext(workspacePath);
-    
-    // Pre-check: should we even fire this heartbeat?
+
     if (!forceType) {
       const { shouldFire, reason } = checkShouldFire(awareness);
       if (!shouldFire) {
@@ -245,110 +214,79 @@ async function performHeartbeat(
         return;
       }
     }
-    
-    // Load conversation history (for legacy checks)
+
     const history = await loadConversation(workspacePath, 'telegram');
-    
-    // Check for recent conversation (skip for maintenance)
+
     if (!forceType) {
       const minutesSince = getMinutesSinceLastActivity(history);
-      
       if (hasRecentActivity(history, RECENT_CONVERSATION_THRESHOLD)) {
         console.log(`  Recent conversation (${minutesSince}m ago) - skipping heartbeat`);
         return;
       }
-      
       console.log(`  Last conversation: ${minutesSince}m ago`);
     }
-    
-    // Check if this is first morning contact (warmth needed) - across ALL channels
+
     const hadContactToday = await hasContactTodayAnyChannel(workspacePath);
     const isFirstMorningContact = isMorning() && !hadContactToday;
     if (isFirstMorningContact) {
       console.log('  First morning contact (any channel) - leading with warmth');
     }
-    
-    // Check for topics to avoid (already asked, no response)
+
     const unansweredTopics = getUnansweredTopics(awareness);
     if (unansweredTopics.length > 0) {
       console.log(`  Unanswered topics to avoid: ${unansweredTopics.join(', ')}`);
     }
-    
-    // Select heartbeat type
+
     const heartbeatType = forceType || selectHeartbeatType();
     console.log(`  Heartbeat type: ${heartbeatType.type}`);
-    
-    // Prepare the prompt with awareness context
+
     const awarenessPrompt = formatAwareness(awareness);
     let basePrompt = heartbeatType.prompt;
-    
-    // Add topic avoidance guidance if relevant
+
     if (unansweredTopics.length > 0 && !forceType) {
       basePrompt += `\n\nNote: You have already asked about ${unansweredTopics.join(', ')} without response. Choose a different angle or simply be present.`;
     }
-    
-    const finalPrompt = (isFirstMorningContact && !forceType) 
+
+    const finalPrompt = (isFirstMorningContact && !forceType)
       ? wrapWithMorningGreeting(basePrompt)
       : basePrompt;
-    
-    let response: string;
-    
-    if (heartbeatType.useTools) {
-      // Use full chat with tool access
-      const workspaceContext = await loadWorkspaceContext(workspacePath, 'heartbeat');
-      // Prepend awareness to system prompt
-      workspaceContext.systemPrompt = awarenessPrompt + '\n\n' + workspaceContext.systemPrompt;
-      
-      response = await chat(
-        finalPrompt,
-        workspaceContext,
-        workspacePath,
-        () => {} // Don't need streaming for heartbeats
-      );
-    } else {
-      // Use lightweight heartbeat context (no tools needed)
-      const systemPrompt = await loadHeartbeatContext(workspacePath);
-      // Prepend awareness to system prompt
-      const fullSystemPrompt = awarenessPrompt + '\n\n' + systemPrompt;
-      const workspaceContext = { systemPrompt: fullSystemPrompt, workspacePath };
-      
-      response = await chat(
-        finalPrompt,
-        workspaceContext,
-        workspacePath,
-        () => {} // Don't need streaming for heartbeats
-      );
-    }
 
-    // Strip internal reasoning (thinking leak fix)
+    // Heartbeat decision: separate lightweight call (NOT the main conversation)
+    const systemPrompt = await loadHeartbeatContext(workspacePath);
+    const fullSystemPrompt = awarenessPrompt + '\n\n' + systemPrompt;
+
+    const response = await simpleChat(finalPrompt, fullSystemPrompt);
+
     let cleanedResponse = stripInternalReasoning(response);
-    
-    // If stripping left us with nothing useful, use original (truncated)
+
     if (cleanedResponse.length < 5) {
       cleanedResponse = response.trim();
     }
 
-    // Check if Claude decided not to send a notification
     if (cleanedResponse === 'NO_NOTIFICATION' || cleanedResponse.includes('NO_NOTIFICATION')) {
       console.log('  Decision: no notification');
       return;
     }
 
-    // Silent heartbeats don't send messages
     if (heartbeatType.silent) {
       console.log('  Silent heartbeat completed');
       return;
     }
 
-    // Send via Telegram if available, otherwise Mac notification
     console.log(`  Sending: ${cleanedResponse.substring(0, 50)}...`);
-    
+
     if (isTelegramRunning()) {
       const sent = await sendToOwner(cleanedResponse);
       if (sent) {
         console.log('  Delivered via Telegram');
-        // Record heartbeat in conversation history so it has context
+
+        // Record in messages.json (for awareness context on future heartbeats)
         await addMessage(workspacePath, 'telegram', 'assistant', cleanedResponse);
+
+        // Append to the main conversation array so Claire sees her heartbeat
+        // as part of the natural conversation when Sergio responds
+        appendAssistantResponse([{ type: 'text', text: cleanedResponse }]);
+        await persistState();
       } else {
         console.log('  Telegram failed, falling back to Mac notification');
         await sendNotification(cleanedResponse);
@@ -356,20 +294,18 @@ async function performHeartbeat(
     } else {
       await sendNotification(cleanedResponse);
     }
-    
+
   } catch (err) {
     console.error('  Heartbeat error:', err);
   }
 }
 
-/**
- * Memory Curation: promote durable learnings from daily notes to MEMORY.md
- */
 async function performMemoryCuration(workspacePath: string): Promise<void> {
   console.log(`[${new Date().toISOString()}] Memory curation started`);
   try {
-    const workspaceContext = await loadWorkspaceContext(workspacePath, 'maintenance');
-    const response = await opusChat(MEMORY_CURATION_PROMPT, workspaceContext, workspacePath);
+    const systemPromptBlocks = await getSystemPrompt(workspacePath);
+    const systemPromptText = systemPromptBlocks.map(b => b.text).join('\n');
+    const response = await opusChat(MEMORY_CURATION_PROMPT, systemPromptText, workspacePath);
 
     const cleanedResponse = stripInternalReasoning(response);
     if (cleanedResponse && cleanedResponse.length >= 5 && !cleanedResponse.includes('NO_NOTIFICATION')) {
@@ -389,24 +325,17 @@ async function performMemoryCuration(workspacePath: string): Promise<void> {
   }
 }
 
-/**
- * Self-Awareness: Claire looks in the mirror.
- * Opus analyzes 7 days of conversation + workspace files.
- * Writes side effects to MEMORY.md, DEV-NOTES.md, THREADS.md, SELF-AWARENESS.md.
- * Silent — does not message Sergio.
- */
 async function performSelfAwareness(workspacePath: string): Promise<void> {
   console.log(`[${new Date().toISOString()}] Self-awareness pass started`);
   try {
-    const workspaceContext = await loadWorkspaceContext(workspacePath, 'self-awareness');
+    const systemPromptBlocks = await getSystemPrompt(workspacePath);
+    let systemPromptText = systemPromptBlocks.map(b => b.text).join('\n');
 
-    // Load 7 days of conversation history for the self-awareness context
     const { resolve } = await import('path');
     const absolutePath = resolve(workspacePath);
     const log = await loadConversationLog(absolutePath);
     const weekMessages = getRecentMessages(log, { withinHours: 168 });
 
-    let conversationSection = '';
     if (weekMessages.length > 0) {
       const lines: string[] = ['## Conversation History (Past 7 Days)\n'];
       for (const msg of weekMessages) {
@@ -417,23 +346,16 @@ async function performSelfAwareness(workspacePath: string): Promise<void> {
         const role = msg.role === 'user' ? 'Sergio' : 'You';
         lines.push(`**${role}** (${time} via ${msg.channel}): ${msg.content}\n`);
       }
-      conversationSection = lines.join('\n');
+      systemPromptText += '\n\n' + lines.join('\n');
     }
 
-    if (conversationSection) {
-      workspaceContext.systemPrompt += '\n\n' + conversationSection;
-    }
-
-    const response = await opusChat(SELF_AWARENESS_PROMPT, workspaceContext, workspacePath);
+    const response = await opusChat(SELF_AWARENESS_PROMPT, systemPromptText, workspacePath);
     console.log(`  Self-awareness pass complete (${response.length} chars)`);
   } catch (err) {
     console.error('  Self-awareness error:', err);
   }
 }
 
-/**
- * Nightly maintenance orchestrator — runs both tasks sequentially at 9pm
- */
 async function performNightlyMaintenance(workspacePath: string): Promise<void> {
   console.log(`[${new Date().toISOString()}] Nightly maintenance triggered`);
   await performMemoryCuration(workspacePath);
@@ -441,20 +363,13 @@ async function performNightlyMaintenance(workspacePath: string): Promise<void> {
   console.log(`[${new Date().toISOString()}] Nightly maintenance complete`);
 }
 
-/**
- * Get random jitter in milliseconds
- */
 function getJitterMs(): number {
   const jitterMinutes = JITTER_MIN + Math.random() * (JITTER_MAX - JITTER_MIN);
   return Math.floor(jitterMinutes * 60 * 1000);
 }
 
-// Daily maintenance schedule (9pm)
 const MAINTENANCE_SCHEDULE = '0 21 * * *';
 
-/**
- * Start the heartbeat scheduler
- */
 export function startHeartbeat(
   workspacePath: string,
   schedule: string = DEFAULT_SCHEDULE
@@ -463,11 +378,10 @@ export function startHeartbeat(
   console.log(`  Jitter range: ${JITTER_MIN}-${JITTER_MAX} minutes`);
 
   const task = cron.schedule(schedule, () => {
-    // Add jitter so heartbeats don't feel like clockwork
     const jitterMs = getJitterMs();
     const jitterMinutes = Math.round(jitterMs / 60000);
     console.log(`[${new Date().toISOString()}] Heartbeat scheduled, jitter: +${jitterMinutes}m`);
-    
+
     setTimeout(() => {
       performHeartbeat(workspacePath).catch((err) => {
         console.error('Heartbeat failed:', err);
@@ -475,7 +389,6 @@ export function startHeartbeat(
     }, jitterMs);
   });
 
-  // Schedule nightly maintenance (memory curation + self-awareness) at 9pm
   console.log(`Starting nightly maintenance scheduler with schedule: ${MAINTENANCE_SCHEDULE}`);
   cron.schedule(MAINTENANCE_SCHEDULE, () => {
     performNightlyMaintenance(workspacePath).catch((err) => {
@@ -483,29 +396,22 @@ export function startHeartbeat(
     });
   });
 
-  // Run an immediate check on startup (unless quiet hours)
   if (!isQuietHours()) {
     console.log('Running initial heartbeat check...');
     setTimeout(() => {
       performHeartbeat(workspacePath).catch((err) => {
         console.error('Initial heartbeat failed:', err);
       });
-    }, 5000); // Wait 5 seconds for everything to initialize
+    }, 5000);
   }
 
   return task;
 }
 
-/**
- * Manually trigger nightly maintenance (useful for testing)
- */
 export async function triggerMaintenance(workspacePath: string): Promise<void> {
   await performNightlyMaintenance(workspacePath);
 }
 
-/**
- * Manually trigger self-awareness pass only (useful for testing)
- */
 export async function triggerSelfAwareness(workspacePath: string): Promise<void> {
   await performSelfAwareness(workspacePath);
 }
@@ -515,14 +421,11 @@ const SELF_AWARENESS_DRY_RUN_SUFFIX = `
 ---
 DRY RUN MODE: Do not write to any files. After your reflection, show exactly what you would have written to each file — quote the text for SELF-AWARENESS.md, and any additions to MEMORY.md, DEV-NOTES.md, or THREADS.md. Show your work.`;
 
-/**
- * Dry-run self-awareness pass — read-only, no writes.
- * Returns the full reflection text for inspection.
- */
 export async function triggerSelfAwarenessDryRun(workspacePath: string): Promise<string> {
   console.log(`[${new Date().toISOString()}] Self-awareness dry run started`);
   try {
-    const workspaceContext = await loadWorkspaceContext(workspacePath, 'self-awareness');
+    const systemPromptBlocks = await getSystemPrompt(workspacePath);
+    let systemPromptText = systemPromptBlocks.map(b => b.text).join('\n');
 
     const { resolve } = await import('path');
     const absolutePath = resolve(workspacePath);
@@ -539,11 +442,11 @@ export async function triggerSelfAwarenessDryRun(workspacePath: string): Promise
         const role = msg.role === 'user' ? 'Sergio' : 'You';
         lines.push(`**${role}** (${time} via ${msg.channel}): ${msg.content}\n`);
       }
-      workspaceContext.systemPrompt += '\n\n' + lines.join('\n');
+      systemPromptText += '\n\n' + lines.join('\n');
     }
 
     const dryRunPrompt = SELF_AWARENESS_PROMPT + SELF_AWARENESS_DRY_RUN_SUFFIX;
-    const response = await opusChat(dryRunPrompt, workspaceContext, workspacePath, { readOnly: true });
+    const response = await opusChat(dryRunPrompt, systemPromptText, workspacePath, { readOnly: true });
     console.log(`[${new Date().toISOString()}] Dry run complete (${response.length} chars)`);
     return response;
   } catch (err) {
@@ -552,9 +455,6 @@ export async function triggerSelfAwarenessDryRun(workspacePath: string): Promise
   }
 }
 
-/**
- * Manually trigger a heartbeat (useful for testing)
- */
 export async function triggerHeartbeat(workspacePath: string): Promise<void> {
   await performHeartbeat(workspacePath);
 }
